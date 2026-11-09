@@ -1,0 +1,1 @@
+ALTER TABLE accounts ADD COLUMN unlimited INTEGER NOT NULL DEFAULT 0 CHECK(unlimited IN (0,1));

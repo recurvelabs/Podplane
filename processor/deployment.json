@@ -1,0 +1,13 @@
+{
+  "account_id": "a6ebbf7e0d73f685d6b73640d504f54b",
+  "script_name": "podplane-audio",
+  "url": "https://podplane-audio.dchalloner.workers.dev",
+  "database_id": "67860066-417e-43e7-a39d-c72b01c2ef30",
+  "bucket_name": "podplane-audio-production",
+  "workflow_name": "podplane-episodes",
+  "class_name": "EpisodeWorkflow",
+  "cron": "*/30 * * * *",
+  "compatibility_date": "2026-11-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "required_secrets": ["INTERNAL_SECRET", "FEED_SECRET"]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "podplane",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "bash scripts/build.sh",
+    "build:staging": "node scripts/build-staging.mjs",
+    "setup:codex": "bash scripts/setup-codex.sh",
+    "validate": "node scripts/validate-artifact.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "version": "1.0.0",
+  "description": "Private podcast feeds with automatic ad removal, email sign-in and passkeys.",
+  "engines": {"node": ">=24"},
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

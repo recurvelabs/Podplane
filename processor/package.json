@@ -1,0 +1,14 @@
+{
+  "name": "podplane-processor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild index.js --bundle --format=esm --platform=neutral --main-fields=module,main --external:cloudflare:workers --external:node:buffer --outfile=dist/index.js"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.1.0",
+    "esbuild": "^0.28.2",
+    "fast-xml-parser": "^5.12.0"
+  }
+}

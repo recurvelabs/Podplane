@@ -1,0 +1,26 @@
+{
+  "account_id": "a6ebbf7e0d73f685d6b73640d504f54b",
+  "script_name": "podplane-staging",
+  "url": "https://podplane-staging.challoner.dev",
+  "database_id": "a80e6065-2b76-4650-9b00-1421bcbc36e0",
+  "bucket_name": "podplane-audio-staging",
+  "workflow_name": "podplane-episodes-staging",
+  "class_name": "EpisodeWorkflow",
+  "cron": "*/30 * * * *",
+  "zone_id": "78183478195807c515a3b2e0853a7b6c",
+  "compatibility_date": "2026-11-08",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "required_secrets": [
+    "INTERNAL_SECRET",
+    "FEED_SECRET"
+  ],
+  "public_bindings": [
+    "PUBLIC_ORIGIN",
+    "EMAIL_FROM"
+  ],
+  "email_from": "signin@notify.podplane-staging.challoner.dev",
+  "email_sending_subdomain_id": "fbe1faa3b246466783c5b49ed055573f",
+  "email_binding": "EMAIL"
+}
