@@ -1,6 +1,6 @@
 # Lessons from MinusPod
 
-Reviewed November 9, 2026. Source: [ttlequals0/MinusPod](https://github.com/ttlequals0/MinusPod), commit `6f648a2d58cee1463d62ed0d81c9ecb224c9adc7` (November 8). MinusPod is MIT licensed. Podplane's changes are independently written JavaScript; no MinusPod code or prompts were copied.
+Reviewed November 8, 2026 (Pacific). Source: [ttlequals0/MinusPod](https://github.com/ttlequals0/MinusPod), commit `6f648a2d58cee1463d62ed0d81c9ecb224c9adc7` (November 8). MinusPod is MIT licensed. Podplane's changes are independently written JavaScript; no MinusPod code or prompts were copied.
 
 ## Changes included in this repository
 
@@ -30,7 +30,7 @@ MinusPod has both a candidate reviewer and a later verification pipeline that re
 
 Both Podplane passes currently use the same Llama model. Their errors can correlate, and model-reported confidence is uncalibrated. Exact evidence quoting checks transcript support; it cannot establish advertising semantics by itself. Segment IDs also cannot separate editorial and ad speech within a single transcription segment. Such proposals are instructed to stay intact. Frame boundaries protect nearby audio but do not eliminate MP3 bit-reservoir artifacts.
 
-The automated suite checks safety gates and stream behavior with provider fixtures. Real listening evaluation and live model accuracy remain unmeasured. These source changes have not been deployed to the staging Worker as part of the GitHub push.
+The automated suite checks safety gates and stream behavior with provider fixtures. Real listening evaluation and live model accuracy remain unmeasured. These source changes were deployed to `podplane-staging` on November 8, 2026 at 8:07 p.m. Pacific from commit `9e8bdcc7e581295e00c6f4cc71c04260f6834531`. Public service health, catalog rendering and account API protection were checked after deployment. Existing cached episodes have not been reprocessed with the new reviewer.
 
 ## Sources reviewed
 

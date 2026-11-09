@@ -36,3 +36,7 @@ The three Acquired failures were requeued under the owner's stored unlimited ent
 All 37 tests passed, along with staging compilation, legacy Sites compilation and artifact validation. Added cases exercise eight-hop chains, twenty-hop boundaries, cycles, private redirect destinations, JSON-string Workflow execution, and malformed payload rejection before D1 access.
 
 The current result verifies the original download failure is repaired for live samples. Completion and listening quality for all twelve asynchronous recovery jobs still need a later check.
+
+## Deployment follow-up
+
+At the November 8, 2026 evening deployment check, all three Pivot, three Pod Save America and three Ezra Klein retries were ready. Two Acquired retries were also ready; one Acquired episode remained in transcription. The database had fifteen ready episodes and one transcribing episode, with no failed episode rows. The active older Workflow continued without an error after the new code upload. Listening quality still needs evaluation.
