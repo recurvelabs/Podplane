@@ -11,7 +11,7 @@ Reviewed November 8, 2026 (Pacific). Source: [ttlequals0/MinusPod](https://githu
 | Keep decisions must survive overlapping proposals | Overlapping detector proposals within a window are combined before review. Windows own disjoint core segment IDs. |
 | Preserve evidence through merging | Accepted cuts retain detector/reviewer scores, quoted evidence and individual review records. Workflow results include candidate and review-rejection counts. |
 | Avoid swallowing speech between cuts | Cut normalization preserves short gaps. The MP3 editor retains frames crossing a cut boundary, sacrificing at most an edge frame of removal to protect adjacent speech. |
-| Treat failed review as unfinished processing | A malformed or unavailable review cannot publish unreviewed first-pass cuts. Review batches contain at most eight proposals and have separate resumable Workflow steps. Empty detection requires no review call. |
+| Preserve audio when a verdict is missing | Review requests use a JSON schema and decisions are matched by candidate ID. Missing, duplicate or unusable verdicts keep their proposed audio and produce a library notice; other independently verified cuts can publish. Invalid JSON and provider outages remain retryable failures. Batches contain at most eight proposals and have separate resumable Workflow steps. Empty detection requires no review call. |
 
 The implementation is in `processor/detection.js`, with integration in `processor/index.js`. It needs no new bindings, secrets, model providers or database migration. It preserves selected-show processing and shared caching.
 
@@ -31,6 +31,8 @@ MinusPod has both a candidate reviewer and a later verification pipeline that re
 Both Podplane passes currently use the same Llama model. Their errors can correlate, and model-reported confidence is uncalibrated. Exact evidence quoting checks transcript support; it cannot establish advertising semantics by itself. Segment IDs also cannot separate editorial and ad speech within a single transcription segment. Such proposals are instructed to stay intact. Frame boundaries protect nearby audio but do not eliminate MP3 bit-reservoir artifacts.
 
 The automated suite checks safety gates and stream behavior with provider fixtures. Real listening evaluation and live model accuracy remain unmeasured. These source changes were deployed to `podplane-staging` on November 8, 2026 at 8:07 p.m. Pacific from commit `9e8bdcc7e581295e00c6f4cc71c04260f6834531`. Public service health, catalog rendering and account API protection were checked after deployment. Existing cached episodes have not been reprocessed with the new reviewer.
+
+At 8:37 p.m. Pacific, a follow-up deployed schema-guided review responses and safe handling of incomplete verdicts. A live reproduction confirmed that generic JSON mode could return the wrong property name. The same excerpt produced the expected `decisions` field with the schema. This validates the response contract for that sample; accuracy across podcasts still needs a listening benchmark.
 
 ## Sources reviewed
 

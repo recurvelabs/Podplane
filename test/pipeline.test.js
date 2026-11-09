@@ -37,6 +37,12 @@ test('review provider failure cannot publish a first-pass cut',async()=>{
   env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};if(input.messages[0].content.startsWith('Review'))throw Error('Reviewer unavailable');return {response:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
   try{await assert.rejects(()=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step),/Reviewer unavailable/);assert.ok(!data.has('clean/'+episodeId+'.mp3'));assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'failed');}finally{globalThis.fetch=oldFetch;db.close();}
 });
+test('incomplete review finishes with a notice and keeps every unreviewed audio frame',async()=>{
+  const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
+  globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
+  env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};return {response:input.messages[0].content.startsWith('Review')?{"decisions':[{":[]}:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
+  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,0);assert.equal(result.unreviewed,1);const episode=db.prepare('SELECT status,error FROM episodes WHERE id=?').get(episodeId);assert.equal(episode.status,'ready');assert.match(episode.error,/possible ads were left/);assert.deepEqual(data.get('clean/'+episodeId+'.mp3'),bytes);}finally{globalThis.fetch=oldFetch;db.close();}
+});
 test('REST JSON payloads run the same audio pipeline and invalid payloads make no database calls',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});

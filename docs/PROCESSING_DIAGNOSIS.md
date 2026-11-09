@@ -40,3 +40,15 @@ The current result verifies the original download failure is repaired for live s
 ## Deployment follow-up
 
 At the November 8, 2026 evening deployment check, all three Pivot, three Pod Save America and three Ezra Klein retries were ready. Two Acquired retries were also ready; one Acquired episode remained in transcription. The database had fifteen ready episodes and one transcribing episode, with no failed episode rows. The active older Workflow continued without an error after the new code upload. Listening quality still needs evaluation.
+
+## Reviewer response failure
+
+Later that evening, The Daily episode "Keisha Lance Bottoms on What Democrats Have to Do to Not Squander the Win" stopped at 89% with `Ad reviewer must decide every candidate`. Its Workflow was `ep-3281cb52a7468c85266eebf351763625b37e09f4-1`. The last review step, `review-300-0`, expected one verdict for transcript IDs 316-318 and failed on all three attempts. Earlier detection and review windows had completed.
+
+The failed model response was not stored. Replaying the same excerpt with the original request reproduced a valid JSON object whose property name was garbled rather than `decisions`. Generic JSON mode constrained JSON syntax but supplied no response schema. The strict application check then turned an unusable verdict into a failure for the whole episode.
+
+The repair adds a JSON response schema and matches decisions by candidate ID. A missing, duplicate, conflicting or unusable verdict keeps that candidate's audio intact. Other independently verified cuts may publish, with a notice that some possible ads were retained. Workflow results include `unreviewed`; structured logs contain counts and episode IDs without transcript text. Invalid JSON and provider outages still trigger normal step retries.
+
+The same live excerpt returned a usable single decision under the new schema. All 54 automated tests passed, including the reproduced garbled-key case, partial decisions, duplicate conflicts, response order, preservation of unreviewed frames and provider failures. Worker version `849ac45c-5259-412e-97c7-18a208785820` was deployed at 8:37 p.m. Pacific on November 8, 2026 with configuration and secrets preserved. The affected Workflow was restarted from `review-300-0` to reuse its completed download and transcription.
+
+The resumed Workflow completed successfully: five verified ad cuts, about 136 seconds marked for removal, and zero unreviewed candidates. Its final review, audio publication and cleanup each succeeded on the first attempt. No download or transcription was repeated during this recovery.
