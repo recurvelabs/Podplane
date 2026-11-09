@@ -52,9 +52,9 @@ The earlier single-pass planning estimate was roughly $0.04 per audio hour befor
 ## Known issues and unfinished verification
 
 1. The initial publisher redirect failures were fixed on November 8, 2026. Publisher links needed six to eight redirects, while the old downloader made only six requests. `safeFetch` now allows twenty redirects, validates every destination and detects cycles. Live Pivot and Pod Save America retries passed downloads with six and eight redirects. See `docs/PROCESSING_DIAGNOSIS.md`.
-2. Three earlier Acquired jobs failed on the beta's three-hour or 220 MiB caps. Unlimited accounts bypass those caps. At the deployment check, two Acquired retries were ready and one was still transcribing. All nine requeued Pivot, Pod Save America and Ezra Klein episodes were ready. The remaining long-file completion and listening quality still need verification.
+2. The earlier Acquired failures on beta size/duration caps were resolved under the unlimited entitlement. All three long episodes had completed by November 9, before the current reprocessing pass. All nine earlier Pivot, Pod Save America and Ezra Klein retries also completed. Listening quality still needs evaluation.
 3. Live email inbox delivery has not been exercised end to end. The sender DNS and binding were verified, and mocked delivery and verification tests pass. Use an explicitly authorized test recipient for a live delivery test.
-4. Longer and larger MP3 processing still needs a real listening evaluation and a completed large-file run. The repair has regression coverage for redirect chains, loops, private destinations, and Workflow payloads supplied as either objects or JSON strings. Invalid Workflow payloads are rejected before D1 access.
+4. Longer and larger MP3 processing has completed live runs and still needs a listening evaluation. The repair has regression coverage for redirect chains, loops, private destinations, and Workflow payloads supplied as either objects or JSON strings. Invalid Workflow payloads are rejected before D1 access.
 5. Standard account first-import behavior and recurring refresh need further evaluation around back-catalog boundaries. The scheduler currently considers up to three recent candidates per refresh.
 
 ## Deployment and persistence
