@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { Buffer } from 'node:buffer';
 import { parseFeed, publicURL, safeFetch, boundedText, rss } from './feeds.js';
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
-import { detectCandidates, reviewCandidates, REVIEW_BATCH_SIZE } from './detection.js';
+import { detectCandidates, mergeCandidates, reviewCandidates } from './detection.js';
 
 const NOW=()=>Math.floor(Date.now()/1000);
 const ORIGIN='https://podplane-audio.dchalloner.workers.dev';
@@ -44,9 +44,9 @@ async function dashboard(env,a){
   const {results:shows}=await env.DB.prepare(`SELECT p.id,p.title,p.author,p.artwork,p.last_sync,p.last_error,s.created_at,
     (SELECT count(*) FROM episodes e WHERE e.podcast_id=p.id AND e.status='ready') AS ready_count
     FROM subscriptions s JOIN podcasts p ON p.id=s.podcast_id WHERE s.account_id=? ORDER BY s.created_at DESC`).bind(a.id).all();
-  const {results:episodes}=await env.DB.prepare(`SELECT e.id,e.podcast_id,e.title,e.published_at,e.duration,e.cleaned_duration,e.audio_bytes,e.status,e.progress,e.cuts_json,e.error,p.title AS podcast_title,p.artwork
+  const {results:episodes}=await env.DB.prepare(`SELECT e.id,e.podcast_id,e.title,e.published_at,e.duration,e.cleaned_duration,e.audio_bytes,e.status,e.progress,e.cuts_json,e.error,e.ready_at,p.title AS podcast_title,p.artwork
     FROM episodes e JOIN podcasts p ON p.id=e.podcast_id JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=? AND e.created_at>? ORDER BY e.published_at DESC LIMIT 60`).bind(a.id,NOW()-RETENTION).all();
-  return {feed_url:`${base}/rss`,plan:a.unlimited?'unlimited':'beta',max_shows:a.unlimited?null:5,daily_audio_minutes:a.unlimited?null:600,retention_days:30,shows:shows.map(s=>({...s,feed_url:`${base}/${s.id}/rss`})),episodes:episodes.map(e=>({...e,cuts:JSON.parse(e.cuts_json),cuts_json:undefined,audio_url:e.status==='ready'?`${base}/audio/${e.id}.mp3`:null}))};
+  return {feed_url:`${base}/rss`,plan:a.unlimited?'unlimited':'beta',max_shows:a.unlimited?null:5,daily_audio_minutes:a.unlimited?null:600,retention_days:30,shows:shows.map(s=>({...s,feed_url:`${base}/${s.id}/rss`})),episodes:episodes.map(e=>({...e,cuts:JSON.parse(e.cuts_json),cuts_json:undefined,audio_url:e.status==='ready'?`${base}/audio/${e.id}.mp3${e.ready_at?'?v='+e.ready_at:''}`:null}))};
 }
 async function insertEpisodes(env,podcastId,items){
   for(const item of items){
@@ -145,18 +145,24 @@ export async function publicFeed(req,env,url){
   if(req.method!=='GET'&&req.method!=='HEAD')throw err('Method not allowed',405);
   const audio=/^audio\/([a-f0-9]{40})\.mp3$/.exec(route);
   if(audio){
-    const e=await env.DB.prepare("SELECT e.id,e.audio_bytes FROM episodes e JOIN subscriptions s ON s.podcast_id=e.podcast_id WHERE s.account_id=? AND e.id=? AND e.status='ready' AND e.created_at>?").bind(a.id,audio[1],NOW()-RETENTION).first();if(!e)throw err('Episode not found',404);
-    let range;try{range=parseRange(req.headers.get('Range'),e.audio_bytes);}catch{return new Response(null,{status:416,headers:{'Content-Range':`bytes */${e.audio_bytes}`}});}
-    const headers={'Content-Type':'audio/mpeg','Accept-Ranges':'bytes','Content-Length':String(range?.length??e.audio_bytes),'Cache-Control':'private, max-age=3600','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'};
-    if(range)headers['Content-Range']=`bytes ${range.offset}-${range.offset+range.length-1}/${e.audio_bytes}`;
+    const e=await env.DB.prepare("SELECT e.id,e.audio_bytes,e.ready_at FROM episodes e JOIN subscriptions s ON s.podcast_id=e.podcast_id WHERE s.account_id=? AND e.id=? AND e.status='ready' AND e.created_at>?").bind(a.id,audio[1],NOW()-RETENTION).first();if(!e)throw err('Episode not found',404);
+    const requested=url.searchParams.get('v');if(requested&&!/^\d{1,16}$/.test(requested))throw err('Invalid audio version',400);
+    const version=requested||e.ready_at;
+    let key=version?`clean/${e.id}/${version}.mp3`:`clean/${e.id}.mp3`,head=await env.AUDIO.head(key);
+    if(!head){key=`clean/${e.id}.mp3`;head=await env.AUDIO.head(key);}
+    if(!head)throw err('Audio temporarily unavailable',503);
+    const audioSize=head.size;
+    let range;try{range=parseRange(req.headers.get('Range'),audioSize);}catch{return new Response(null,{status:416,headers:{'Content-Range':`bytes */${audioSize}`}});}
+    const headers={'Content-Type':'audio/mpeg','Accept-Ranges':'bytes','Content-Length':String(range?.length??audioSize),'Cache-Control':'private, max-age=3600','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'};
+    if(range)headers['Content-Range']=`bytes ${range.offset}-${range.offset+range.length-1}/${audioSize}`;
     if(req.method==='HEAD')return new Response(null,{status:range?206:200,headers});
-    const obj=await env.AUDIO.get(`clean/${e.id}.mp3`,range?{range}:undefined);if(!obj)throw err('Audio temporarily unavailable',503);
+    const obj=await env.AUDIO.get(key,range?{range}:undefined);if(!obj)throw err('Audio temporarily unavailable',503);
     return new Response(obj.body,{status:range?206:200,headers});
   }
   const specific=/^([a-f0-9]{32})\/rss$/.exec(route);if(route!=='rss'&&!specific)throw err('Not found',404);
   let show=null;if(specific){show=await env.DB.prepare('SELECT p.* FROM podcasts p JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=? AND p.id=?').bind(a.id,specific[1]).first();if(!show)throw err('Feed not found',404);}
   const {results:items}=await env.DB.prepare(`SELECT e.*,p.title AS podcast_title,p.author,p.artwork FROM episodes e JOIN podcasts p ON p.id=e.podcast_id JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=? AND e.status='ready' AND e.created_at>? ${show?'AND p.id=?':''} ORDER BY e.published_at DESC LIMIT 100`).bind(...[a.id,NOW()-RETENTION,...(show?[show.id]:[])]).all();
-  const body=rss({title:show?`${show.title} · Podplane`:'My podcasts · Podplane',description:show?.description||'Your private podcast feed, with detected advertising removed.',artwork:show?.artwork,link:env.PUBLIC_ORIGIN||SITE,self:url.href,items:items.map(e=>({...e,audio_url:`${base}/audio/${e.id}.mp3`}))});
+  const body=rss({title:show?`${show.title} · Podplane`:'My podcasts · Podplane',description:show?.description||'Your private podcast feed, with detected advertising removed.',artwork:show?.artwork,link:env.PUBLIC_ORIGIN||SITE,self:url.href,items:items.map(e=>({...e,audio_url:`${base}/audio/${e.id}.mp3${e.ready_at?'?v='+e.ready_at:''}`}))});
   return new Response(req.method==='HEAD'?null:body,{headers:{'Content-Type':'application/rss+xml; charset=utf-8','Cache-Control':'private, max-age=120','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'}});
 }
 export async function tick(env){
@@ -179,7 +185,10 @@ export default {
 };
 
 const STEP={retries:{limit:2,delay:'15 seconds',backoff:'exponential'},timeout:'5 minutes'};
-async function progress(env,id,status,n){await env.DB.prepare('UPDATE episodes SET status=?,progress=? WHERE id=?').bind(status,n,id).run();}
+async function progress(env,id,status,n,preserveReady=false){
+  if(preserveReady)await env.DB.prepare('UPDATE episodes SET progress=? WHERE id=?').bind(n,id).run();
+  else await env.DB.prepare('UPDATE episodes SET status=?,progress=? WHERE id=?').bind(status,n,id).run();
+}
 function segmentsOf(result,start,end){
   let segments=(result.segments||[]).map(s=>({start:Number(s.start),end:Number(s.end),text:String(s.text||'')}));
   if(!segments.length&&result.vtt){const re=/(\d{2}:)?(\d{2}):(\d{2})\.(\d{3}) --> (\d{2}:)?(\d{2}):(\d{2})\.(\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|$)/g;let m;while((m=re.exec(result.vtt))){const secs=(h,m,s,ms)=>(parseInt(h||'0')*3600)+Number(m)*60+Number(s)+Number(ms)/1000;segments.push({start:secs(m[1],m[2],m[3],m[4]),end:secs(m[5],m[6],m[7],m[8]),text:m[9].trim()});}}
@@ -195,11 +204,12 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
     if(typeof payload==='string'){try{payload=JSON.parse(payload);}catch{throw new Error('Workflow payload must be valid JSON');}}
     const env=this.env,id=payload?.episode_id;
     if(typeof id!=='string'||!/^[a-f0-9]{40}$/.test(id))throw new Error('Workflow requires a valid episode_id');
+    const preserveReady=payload.reprocess===true;
     try{
       const unlimited=await episodeIsUnlimited(env,id);
       const meta=await step.do('download',STEP,async()=>{
         const ep=await env.DB.prepare('SELECT * FROM episodes WHERE id=?').bind(id).first();if(!ep)throw new Error('Episode missing');
-        await progress(env,id,'processing',3);
+        await progress(env,id,'processing',3,preserveReady);
         const key=`original/${id}.mp3`,cached=await env.AUDIO.head(key);if(cached)return {size:cached.size,key,title:ep.title};
         const redirects=[];
         const res=await safeFetch(ep.source_url,{redirectTrace:redirects});if(!res.ok)throw new Error(`Audio download returned ${res.status}`);
@@ -228,44 +238,51 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       for(let i=0;i<chunks.length;i++){
         const c=chunks[i],index=i;
         const segments=await step.do(`transcribe-${i}`,STEP,async()=>{
-          await progress(env,id,'transcribing',10+Math.round(index/chunks.length*60));
+          await progress(env,id,'transcribing',10+Math.round(index/chunks.length*60),preserveReady);
           const object=await env.AUDIO.get(meta.key,{range:{offset:c.byteStart,length:c.byteLength}});
           const audio=Buffer.from(await object.arrayBuffer()).toString('base64');
           const result=await env.AI.run('@cf/openai/whisper-large-v3-turbo',{audio,task:'transcribe',vad_filter:false,condition_on_previous_text:false});
           const segments=segmentsOf(result,c.start,c.end);await env.AUDIO.put(`work/${id}/transcript-${index}.json`,JSON.stringify(segments));return segments;
         });transcript.push(...segments);
       }
-      const cuts=[];let candidates=0,keptByReview=0,unreviewed=0;
+      const cuts=[],proposals=[];let candidates=0,keptByReview=0,unreviewed=0;
       // 150 transcript segments per pass, with overlapping context. IDs make boundaries deterministic.
       for(let i=0;i<transcript.length;i+=150){
         const coreStart=i,coreEnd=Math.min(i+150,transcript.length),lo=Math.max(0,i-20),hi=Math.min(transcript.length,coreEnd+20);
-        const detected=await step.do(`detect-${i}`,STEP,async()=>{
-          await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*18));
+        const detected=await step.do(`detect-v3-${i}`,STEP,async()=>{
+          await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
           return detectCandidates(env.AI,{title:meta.title,transcript,lo,hi,coreStart,coreEnd});
-        });candidates+=detected.length;
-        for(let j=0;j<detected.length;j+=REVIEW_BATCH_SIZE){
-          const batch=detected.slice(j,j+REVIEW_BATCH_SIZE);
-          const reviewed=await step.do(`review-${i}-${j}`,STEP,()=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi}));
-          cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
-        }
+        });proposals.push(...detected);
+      }
+      const merged=mergeCandidates(transcript,proposals);candidates=merged.length;
+      for(let i=0;i<merged.length;i++){
+        const batch=[merged[i]],lo=Math.max(0,merged[i].start_index-12),hi=Math.min(transcript.length,merged[i].end_index+13);
+        const review=()=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi});
+        let reviewed=await step.do(`review-v3-${i}`,STEP,review);
+        if(reviewed.unreviewed)reviewed=await step.do(`review-v3-retry-${i}`,STEP,review);
+        cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
       }
       const normalized=normalizeCuts(cuts,time),removed=normalized.reduce((n,c)=>n+c.end-c.start,0);
       if(removed>time*0.4)throw new Error('More than 40% was marked as ads. This episode was held to protect the conversation.');
       const reviewNotice=unreviewed?'Some possible ads were left in this episode because their review was incomplete.':null;
       if(unreviewed)console.log(JSON.stringify({event:'ad_review_incomplete',episode:id,candidates,unreviewed}));
       await step.do('edit-and-publish',{...STEP,timeout:'10 minutes'},async()=>{
-        await progress(env,id,'editing',94);const ranges=[];let duration=0;
+        await progress(env,id,'editing',94,preserveReady);const ranges=[];let duration=0;
         for(const c of chunks){const index=await (await env.AUDIO.get(c.key)).json();const kept=keepRanges(index.frames,normalized);duration+=kept.duration;for(const r of kept.ranges){const last=ranges.at(-1);if(last&&last.offset+last.length===r.offset)last.length+=r.length;else ranges.push({...r});}}
         const size=ranges.reduce((n,r)=>n+r.length,0);if(!size)throw new Error('No playable audio remains');
         const fixed=new FixedLengthStream(size),writer=fixed.writable.getWriter();
         const write=(async()=>{try{for(const range of ranges){const o=await env.AUDIO.get(meta.key,{range});const reader=o.body.getReader();try{for(;;){const {done,value}=await reader.read();if(done)break;await writer.write(value);}}finally{reader.releaseLock();}}await writer.close();}catch(e){await writer.abort(e);throw e;}})();
-        await Promise.all([env.AUDIO.put(`clean/${id}.mp3`,fixed.readable,{httpMetadata:{contentType:'audio/mpeg'}}),write]);
-        await env.DB.prepare("UPDATE episodes SET status='ready',progress=100,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=? WHERE id=?").bind(duration,size,JSON.stringify(normalized),NOW(),reviewNotice,id).run();
+        const publishedAt=Math.max(NOW(),Number((await env.DB.prepare('SELECT ready_at FROM episodes WHERE id=?').bind(id).first())?.ready_at||0)+1);
+        await Promise.all([env.AUDIO.put(`clean/${id}/${publishedAt}.mp3`,fixed.readable,{httpMetadata:{contentType:'audio/mpeg'}}),write]);
+        await env.DB.prepare("UPDATE episodes SET status='ready',progress=100,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=? WHERE id=?").bind(duration,size,JSON.stringify(normalized),publishedAt,reviewNotice,id).run();
       });
       await step.do('cleanup',STEP,async()=>{await env.AUDIO.delete(meta.key);const list=await env.AUDIO.list({prefix:`work/${id}/`,limit:1000});if(list.objects.length)await env.AUDIO.delete(list.objects.map(o=>o.key));});
       return {episode_id:id,ads:normalized.length,removed_seconds:Math.round(removed),candidates,kept_by_review:keptByReview,unreviewed};
     }catch(error){
-      await step.do('record-failure',async()=>{await env.DB.prepare("UPDATE episodes SET status='failed',error=? WHERE id=? AND status!='ready'").bind(String(error.message||'Processing failed').slice(0,400),id).run();});
+      await step.do('record-failure',async()=>{
+        if(preserveReady)await env.DB.prepare("UPDATE episodes SET progress=100,error=? WHERE id=? AND status='ready'").bind('Audio refresh failed; the previous version is still available. '+String(error.message||'').slice(0,250),id).run();
+        else await env.DB.prepare("UPDATE episodes SET status='failed',error=? WHERE id=? AND status!='ready'").bind(String(error.message||'Processing failed').slice(0,400),id).run();
+      });
       throw error;
     }
   }

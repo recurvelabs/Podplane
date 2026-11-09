@@ -52,3 +52,13 @@ The repair adds a JSON response schema and matches decisions by candidate ID. A 
 The same live excerpt returned a usable single decision under the new schema. All 54 automated tests passed, including the reproduced garbled-key case, partial decisions, duplicate conflicts, response order, preservation of unreviewed frames and provider failures. Worker version `849ac45c-5259-412e-97c7-18a208785820` was deployed at 8:37 p.m. Pacific on November 8, 2026 with configuration and secrets preserved. The affected Workflow was restarted from `review-300-0` to reuse its completed download and transcription.
 
 The resumed Workflow completed successfully: five verified ad cuts, about 136 seconds marked for removal, and zero unreviewed candidates. Its final review, audio publication and cleanup each succeeded on the first attempt. No download or transcription was repeated during this recovery.
+
+## Ads retained at detection-window boundaries
+
+On November 9, The Daily's newest processed episode had six candidates but only three accepted cuts, totaling about 73 seconds. The logs showed a Schwab read split between IDs 148-149 in one window and 150-157 in the next. Both fragments stayed in the audio as incomplete reviews. Another candidate received a keep decision. The earlier repair improved availability by preserving unusable verdicts, which still left those ads audible.
+
+The new detector keeps complete spans from overlapping context. Candidates from all windows are merged before a focused review of each commercial break. Detection and review both request response schemas. Incomplete review receives one additional attempt, with uncertain speech still preserved. Commercial paid-subscription offers from the publisher are explicitly covered. Regression tests reproduce the 148-157 boundary case end to end.
+
+Reprocessing now preserves the previous published audio and writes a new versioned object before switching the current publication. RSS and dashboard URLs include that version; old version URLs keep their own byte lengths for seeking. The unchanged legacy objects remain readable. This prevents cache reuse across replacements, while copies already downloaded to a podcast app still require removal and another download.
+
+All 58 tests, both builds and artifact validation passed. Worker version `c81dc267-a516-42c8-a8ae-42984f24b5b3` was deployed at 8:42 a.m. Pacific with the existing configuration and secrets. Nineteen current episodes across the existing six subscribed shows were queued for another pass, with The Daily prioritized. Reprocessing does not import or process unselected catalog shows.
