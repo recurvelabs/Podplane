@@ -52,6 +52,14 @@ export function parseFeed(xml){
   if(!episodes.length)throw new Error('No audio episodes found in this RSS feed');
   return {title,description:plain(c.description),author:plain(c['itunes:author']),artwork:str(artwork),website:str(c.link),episodes};
 }
+export function combinedEpisodeTitle(podcastTitle,episodeTitle){
+  const name=String(podcastTitle||'Podcast').trim();
+  const aliases={'the daily':'Daily','the joe rogan experience':'JRE','pod save america':'PSA','the ezra klein show':'Ezra Klein','up first from npr':'Up First','all-in with chamath, jason, sacks & friedberg':'All-In','goodfellows: conversations on economics, history & geopolitics':'GoodFellows'};
+  const first=name.split(/[:|]/)[0].trim();
+  const short=aliases[name.toLowerCase()]||(first.length<=32?first:first.slice(0,33).replace(/\s+\S*$/,'').trim());
+  const prefix=`${short}: `,title=String(episodeTitle||'Untitled episode');
+  return title.toLowerCase().startsWith(prefix.toLowerCase())?title:prefix+title;
+}
 export function rss({title,description,artwork,link,self,items}){
   return `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>${esc(title)}</title><link>${esc(link)}</link><description>${esc(description)}</description><language>en</language><itunes:explicit>true</itunes:explicit><itunes:block>yes</itunes:block><atom:link href="${esc(self)}" rel="self" type="application/rss+xml"/><ttl>30</ttl>${artwork?`<itunes:image href="${esc(artwork)}"/>`:''}${items.map(e=>`<item><title>${esc(e.title)}</title><guid isPermaLink="false">podplane:${esc(e.id)}</guid><pubDate>${new Date(e.published_at*1000).toUTCString()}</pubDate><description>${esc(e.description)}\n\nProcessed by Podplane. ${Math.round(e.duration-e.cleaned_duration)} seconds removed. Ad detection may miss some ads.</description><itunes:author>${esc(e.author||e.podcast_title)}</itunes:author><itunes:duration>${Math.round(e.cleaned_duration)}</itunes:duration>${e.artwork?`<itunes:image href="${esc(e.artwork)}"/>`:''}<enclosure url="${esc(e.audio_url)}" length="${e.audio_bytes}" type="audio/mpeg"/></item>`).join('')}</channel></rss>`;
 }

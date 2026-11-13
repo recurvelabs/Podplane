@@ -29,6 +29,8 @@ Unlimited access is a stored account entitlement (`accounts.unlimited=1`) grante
 
 ## Audio pipeline
 
+Combined RSS feeds prefix episode titles with a short show name, such as `Daily: ...`, `JRE: ...` or `PSA: ...`. Per-show feeds retain the publisher's episode titles. Feed URLs, episode GUIDs and audio enclosures stay the same.
+
 New subscriptions enqueue the latest episode. Cron checks active shows every 30 minutes and picks up new episodes. Publisher downloads follow up to twenty redirects with destination validation and cycle detection. A resumable Workflow streams source audio into R2, indexes MP3 frames in bounded reads, transcribes three-minute chunks with Whisper Large V3 Turbo, and detects paid advertisements with Llama 3.3 70B. A separate call reviews proposed cuts against the surrounding transcript. Both stages must report at least 90% confidence; removal requires an exact supporting quote from the selected range. The reviewer can reject or narrow a proposal. Transcript IDs constrain boundaries to observed segments. Overlapping context is used during classification. Episodes with more than 40% marked for removal are held.
 
 Review requests include a JSON response schema. Missing, duplicate or unusable verdicts preserve the corresponding proposed audio; independently verified cuts can still publish. Episodes with incomplete reviews show a notice in the library, and Workflow results record the count. Invalid JSON and provider outages remain retryable processing failures. Decision IDs, confidence, boundaries and evidence are validated even when the provider reports schema compliance.

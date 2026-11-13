@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { Buffer } from 'node:buffer';
-import { parseFeed, publicURL, safeFetch, boundedText, rss } from './feeds.js';
+import { parseFeed, publicURL, safeFetch, boundedText, rss, combinedEpisodeTitle } from './feeds.js';
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
 import { detectCandidates, mergeCandidates, reviewCandidates } from './detection.js';
 
@@ -162,7 +162,7 @@ export async function publicFeed(req,env,url){
   const specific=/^([a-f0-9]{32})\/rss$/.exec(route);if(route!=='rss'&&!specific)throw err('Not found',404);
   let show=null;if(specific){show=await env.DB.prepare('SELECT p.* FROM podcasts p JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=? AND p.id=?').bind(a.id,specific[1]).first();if(!show)throw err('Feed not found',404);}
   const {results:items}=await env.DB.prepare(`SELECT e.*,p.title AS podcast_title,p.author,p.artwork FROM episodes e JOIN podcasts p ON p.id=e.podcast_id JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=? AND e.status='ready' AND e.created_at>? ${show?'AND p.id=?':''} ORDER BY e.published_at DESC LIMIT 100`).bind(...[a.id,NOW()-RETENTION,...(show?[show.id]:[])]).all();
-  const body=rss({title:show?`${show.title} · Podplane`:'My podcasts · Podplane',description:show?.description||'Your private podcast feed, with detected advertising removed.',artwork:show?.artwork,link:env.PUBLIC_ORIGIN||SITE,self:url.href,items:items.map(e=>({...e,audio_url:`${base}/audio/${e.id}.mp3${e.ready_at?'?v='+e.ready_at:''}`}))});
+  const body=rss({title:show?`${show.title} · Podplane`:'My podcasts · Podplane',description:show?.description||'Your private podcast feed, with detected advertising removed.',artwork:show?.artwork,link:env.PUBLIC_ORIGIN||SITE,self:url.href,items:items.map(e=>({...e,title:show?e.title:combinedEpisodeTitle(e.podcast_title,e.title),audio_url:`${base}/audio/${e.id}.mp3${e.ready_at?'?v='+e.ready_at:''}`}))});
   return new Response(req.method==='HEAD'?null:body,{headers:{'Content-Type':'application/rss+xml; charset=utf-8','Cache-Control':'private, max-age=120','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'}});
 }
 export async function tick(env){

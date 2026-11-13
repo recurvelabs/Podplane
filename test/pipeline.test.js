@@ -72,6 +72,21 @@ test('accounts are isolated; feed rotation and account deletion revoke old capab
   assert.equal((await internal('alice','account','DELETE')).status,200);assert.equal((await service.fetch(new Request(rotated.feed_url),env)).status,404);db.close();
 });
 
+test('combined RSS prefixes episode titles while per-show RSS preserves publisher titles and audio identity',async()=>{
+  const {db,env}=environment();seed(db);
+  const dashboard=await (await service.fetch(new Request('https://service.example/internal/dashboard',{headers:{Authorization:'Bearer '+env.INTERNAL_SECRET,'X-Podplane-Subject':'alice'}}),env)).json();
+  const alice=db.prepare('SELECT id FROM accounts WHERE subject=?').get('alice');db.prepare('INSERT INTO subscriptions VALUES(?,?,?)').run(alice.id,podcastId,1);
+  db.prepare("UPDATE episodes SET status='ready',title='A & B',audio_bytes=5,cleaned_duration=5 WHERE id=?").run(episodeId);
+  for(const [show,prefix] of [['The Daily','Daily'],['The Joe Rogan Experience','JRE'],['Pod Save America','PSA'],['The Ezra Klein Show','Ezra Klein'],['Pivot','Pivot'],['Acquired','Acquired']]){
+    db.prepare('UPDATE podcasts SET title=? WHERE id=?').run(show,podcastId);
+    const combined=await (await service.fetch(new Request(dashboard.feed_url),env)).text();
+    const single=await (await service.fetch(new Request(dashboard.feed_url.replace(/rss$/,podcastId+'/rss')),env)).text();
+    assert.ok(combined.includes('<item><title>'+prefix+': A &amp; B</title>'));assert.ok(single.includes('<item><title>A &amp; B</title>'));
+    assert.equal(combined.match(/<guid[^>]*>[^<]+/)[0],single.match(/<guid[^>]*>[^<]+/)[0]);assert.equal(combined.match(/<enclosure[^>]+/)[0],single.match(/<enclosure[^>]+/)[0]);
+  }
+  db.close();
+});
+
 test('a commercial crossing detection windows is reviewed whole and removed once',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});

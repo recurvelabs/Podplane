@@ -30,10 +30,10 @@ The cloud resources continue running independently of this source handoff. This 
 - Codes expire in ten minutes, allow five verification attempts, require the requesting browser, and can be used once. Passkeys support enrollment and sign-in.
 - The catalog contains the Apple Podcasts US top 200 snapshot dated November 8, 2026, plus existing curated shows. Rank, text search and cached-audio filtering work.
 - Catalog imports and browsing start no audio jobs. Following a show imports its latest episode; the scheduler checks followed shows every thirty minutes.
-- Completed audio is cached once and reused across accounts. Accounts receive private combined and per-show RSS feeds.
+- Completed audio is cached once and reused across accounts. Accounts receive private combined and per-show RSS feeds. Combined feeds prefix episode titles with short show names; per-show titles, episode GUIDs and audio enclosures are preserved.
 - The owner account has `accounts.unlimited=1` in the existing live database. The source has no email-based privilege shortcut. Existing email/passkey sessions read the entitlement from D1.
 - Unlimited access removes show-count, add/refresh/retry and daily processing allowances, plus the beta episode size/duration caps. Standard users retain the usual limits.
-- The validated suite has 58 passing tests, including WebAuthn signatures, email-code replay/expiry, catalog imports without processing, account isolation, unlimited entitlements, candidate review, cross-window ad breaks, incomplete-review recovery, audio versions and preservation of playback during a refresh.
+- The validated suite has 59 passing tests, including WebAuthn signatures, email-code replay/expiry, catalog imports without processing, account isolation, unlimited entitlements, candidate review, cross-window ad breaks, incomplete-review recovery, audio versions, preservation of playback during a refresh and combined-feed title prefixes.
 
 ## Processing and costs
 
