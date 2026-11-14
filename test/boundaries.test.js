@@ -1,0 +1,28 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {refineBoundaries} from '../processor/boundaries.js';
+import {findBoundaryIssues} from '../processor/detection.js';
+
+test('mixed ad disclaimer and returning host are split at observed word timestamps and reviewed again',async()=>{
+  const transcript=[{start:0,end:5,text:'This episode is sponsored by Example.'},{start:5,end:10,text:"Terms apply. Scott, we are back."},{start:10,end:20,text:'Congress passed a bill.'}];
+  const cuts=[{start_index:0,end_index:1,start:0,end:10,confidence:.98,sponsor:'Example',reviews:[{start_index:0,end_index:1}]}];
+  let boundaryChecks=0,wordCalls=0;
+  const ai={async run(_model,input){
+    const p=JSON.parse(input.messages[1].content);
+    if(p.edges){boundaryChecks++;return {response:{assessments:p.edges.map(e=>({segment_id:e.segment_id,contains_editorial:boundaryChecks===1&&e.segment_id===1,editorial_quote:boundaryChecks===1&&e.segment_id===1?'Scott, we are back.':''}))}};}
+    if(p.proposals){assert.match(p.proposals[0].candidate_transcript,/\[3\].*Scott/);return {response:{decisions:[{candidate_id:0,action:'remove',start_index:0,end_index:2,confidence:.98,evidence:'This episode is sponsored by Example.'}]}};}
+    return {response:{ads:[]}};
+  }};
+  const r=await refineBoundaries(ai,{title:'Mixed speech',transcript,cuts,duration:20,transcribeSegment:async s=>{
+    wordCalls++;assert.deepEqual(s,transcript[1]);return [{start:5,end:5.5,text:'Terms'},{start:5.5,end:6,text:'apply.'},{start:6,end:7,text:'Scott,'},{start:7,end:8,text:'we'},{start:8,end:9,text:'are'},{start:9,end:10,text:'back.'}];
+  }});
+  assert.equal(r.refined_segments,1);assert.equal(wordCalls,1);assert.equal(boundaryChecks,2);assert.equal(r.cuts[0].end,6);assert.equal(r.coverage.converged,true);
+  assert.equal(r.transcript[r.cuts[0].end_index+1].text,'Scott,');
+});
+
+test('uncertain boundary timing holds publication; fabricated segment IDs cannot trigger transcription',async()=>{
+  const transcript=[{start:0,end:10,text:'An ad. Back to the show.'}],cuts=[{start_index:0,end_index:0,start:0,end:10,confidence:.98}];
+  const ai={async run(){return {response:{assessments:[{segment_id:0,contains_editorial:true,editorial_quote:'Back to the show.'}]}};}};
+  await assert.rejects(()=>refineBoundaries(ai,{title:'No timestamps',transcript,cuts,duration:10,transcribeSegment:async()=>[]}),/could not be transcribed/);
+  await assert.rejects(()=>findBoundaryIssues({async run(){return {response:{assessments:[{segment_id:99,contains_editorial:true,editorial_quote:'Back to the show.'}]}};}},{title:'Invalid IDs',transcript,cuts}),/omitted a verdict/);
+});

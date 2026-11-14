@@ -4,6 +4,7 @@ import { parseFeed, publicURL, safeFetch, boundedText, rss, combinedEpisodeTitle
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
 import { detectCandidates, mergeCandidates, reviewCandidates } from './detection.js';
 import { auditTranscript, AUDIT_VERSION } from './audit.js';
+import { refineBoundaries } from './boundaries.js';
 import { transcribeAudio, transcriptGaps } from './transcription.js';
 
 const NOW=()=>Math.floor(Date.now()/1000);
@@ -214,7 +215,8 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       const meta=await step.do('download',STEP,async()=>{
         const ep=await env.DB.prepare('SELECT * FROM episodes WHERE id=?').bind(id).first();if(!ep)throw new Error('Episode missing');
         await progress(env,id,'processing',3,preserveReady);
-        const key=`original/${id}.mp3`,cached=await env.AUDIO.head(key);if(cached)return {size:cached.size,key,title:ep.title};
+        let key=`original/${id}.mp3`,cached=await env.AUDIO.head(key);if(cached)return {size:cached.size,key,title:ep.title};
+        if(preserveReady){const replay=`original/replay/${id}.mp3`,saved=await env.AUDIO.head(replay);if(saved)return {size:saved.size,key:replay,title:ep.title};}
         const redirects=[];
         const res=await safeFetch(ep.source_url,{redirectTrace:redirects});if(!res.ok)throw new Error(`Audio download returned ${res.status}`);
         const size=Number(res.headers.get('content-length'));if(!Number.isSafeInteger(size)||size<=0||(!unlimited&&size>MAX_BYTES)){await res.body?.cancel();throw new Error(unlimited?'The publisher must provide a known audio download size.':'This beta supports MP3 episodes up to 220 MB with a known download size.');}
@@ -238,7 +240,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         await reserveProcessingBudget(env,id,time);
         await env.DB.prepare('UPDATE episodes SET duration=? WHERE id=?').bind(time,id).run();
       });
-      const transcript=[];
+      let transcript=[];
       for(let i=0;i<chunks.length;i++){
         const c=chunks[i],index=i;
         const segments=await step.do(`transcribe-${i}`,STEP,async()=>{
@@ -254,7 +256,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       const gaps=transcriptGaps(transcript,time);let recoveredSegments=0;
       for(let i=0;i<gaps.length;i++){
         const gap=gaps[i];
-        const recovered=await step.do(`transcribe-gap-v6-${i}`,STEP,async()=>{
+        const recovered=await step.do(`transcribe-gap-v7-${i}`,STEP,async()=>{
           const frames=[];
           for(const c of chunks.filter(c=>c.end>gap.start&&c.start<gap.end)){
             const index=await (await env.AUDIO.get(c.key)).json();
@@ -273,7 +275,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       // 150 transcript segments per pass, with overlapping context. IDs make boundaries deterministic.
       for(let i=0;i<transcript.length;i+=150){
         const coreStart=i,coreEnd=Math.min(i+150,transcript.length),lo=Math.max(0,i-20),hi=Math.min(transcript.length,coreEnd+20);
-        const detected=await step.do(`detect-v6-${i}`,STEP,async()=>{
+        const detected=await step.do(`detect-v7-${i}`,STEP,async()=>{
           await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
           return detectCandidates(env.AI,{title:meta.title,transcript,lo,hi,coreStart,coreEnd});
         });proposals.push(...detected);
@@ -284,7 +286,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         const boundary=transcript.findIndex(s=>s.start>=300);
         const coreEnd=Math.min(boundary<0?transcript.length:boundary,180);
         const hi=Math.min(transcript.length,coreEnd+12);
-        proposals.push(...await step.do('detect-opening-v6',STEP,()=>detectCandidates(env.AI,{
+        proposals.push(...await step.do('detect-opening-v7',STEP,()=>detectCandidates(env.AI,{
           title:meta.title,transcript,lo:0,hi,coreStart:0,coreEnd,focus:'opening'
         })));
       }
@@ -292,8 +294,8 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       for(let i=0;i<merged.length;i++){
         const batch=[merged[i]],lo=Math.max(0,merged[i].start_index-12),hi=Math.min(transcript.length,merged[i].end_index+13);
         const review=retry=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi,retry});
-        let reviewed=await step.do(`review-v6-${i}`,STEP,()=>review(false));
-        if(reviewed.unreviewed)reviewed=await step.do(`review-v6-retry-${i}`,STEP,()=>review(true));
+        let reviewed=await step.do(`review-v7-${i}`,STEP,()=>review(false));
+        if(reviewed.unreviewed)reviewed=await step.do(`review-v7-retry-${i}`,STEP,()=>review(true));
         cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
         if(reviewed.unreviewed)pending.push(...batch);
       }
@@ -301,7 +303,21 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         runStep:(name,fn)=>step.do(name,STEP,fn)});
       cuts.push(...coverage.cuts);candidates+=coverage.candidates;keptByReview+=coverage.kept;unreviewed=coverage.unreviewed;
       if(!coverage.converged)throw new Error('The full-transcript ad audit did not finish cleanly. This episode was held for another review.');
-      const normalized=normalizeCuts(cuts,time),removed=normalized.reduce((n,c)=>n+c.end-c.start,0);
+      const boundaries=await refineBoundaries(env.AI,{title:meta.title,transcript,cuts:normalizeCuts(cuts,time),duration:time,
+        runStep:(name,fn)=>step.do(name,STEP,fn),transcribeSegment:async segment=>{
+          const frames=[];
+          for(const c of chunks.filter(c=>c.end>segment.start&&c.start<segment.end)){
+            const index=await (await env.AUDIO.get(c.key)).json();
+            frames.push(...index.frames.filter(f=>f[2]>=segment.start-1e-8&&f[2]+f[3]<=segment.end+1e-8));
+          }
+          if(!frames.length)throw new Error('Mixed boundary has no audio frames');
+          const first=frames[0],last=frames.at(-1),duration=last[2]+last[3]-first[2];
+          const object=await env.AUDIO.get(meta.key,{range:{offset:first[0],length:last[0]+last[1]-first[0]}});
+          const words=await transcribeAudio(env,new Uint8Array(await object.arrayBuffer()),duration,{words:true});
+          return words.map(s=>({...s,start:first[2]+s.start,end:first[2]+s.end}));
+        }});
+      transcript=boundaries.transcript;
+      const normalized=boundaries.cuts,removed=normalized.reduce((n,c)=>n+c.end-c.start,0);
       if(removed>time*0.4)throw new Error('More than 40% was marked as ads. This episode was held to protect the conversation.');
       const reviewNotice=unreviewed?'Some possible ads were left in this episode because their review was incomplete.':null;
       if(unreviewed)console.log(JSON.stringify({event:'ad_review_incomplete',episode:id,candidates,unreviewed}));
@@ -315,10 +331,12 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         await Promise.all([env.AUDIO.put(`clean/${id}/${publishedAt}.mp3`,fixed.readable,{httpMetadata:{contentType:'audio/mpeg'}}),write]);
         await env.AUDIO.put(`clean/${id}/${publishedAt}.audit.json`,JSON.stringify({version:AUDIT_VERSION,
           episode_id:id,workflow_id:event.instanceId||null,source_bytes:meta.size,source_duration:time,
-          transcript,cuts:normalized,transcription_gaps:{checked:gaps.length,recovered_segments:recoveredSegments},coverage:{passes:coverage.passes,converged:coverage.converged,unreviewed}}),{httpMetadata:{contentType:'application/json'}});
+          transcript,cuts:normalized,transcription_gaps:{checked:gaps.length,recovered_segments:recoveredSegments},boundary_refinement:{refined_segments:boundaries.refined_segments,coverage:boundaries.coverage},coverage:{passes:coverage.passes,converged:coverage.converged,unreviewed}}),{httpMetadata:{contentType:'application/json'}});
         await env.DB.prepare("UPDATE episodes SET status='ready',progress=100,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=? WHERE id=?").bind(duration,size,JSON.stringify(normalized),publishedAt,reviewNotice,id).run();
       });
-      await step.do('cleanup',STEP,async()=>{await env.AUDIO.delete(meta.key);const list=await env.AUDIO.list({prefix:`work/${id}/`,limit:1000});if(list.objects.length)await env.AUDIO.delete(list.objects.map(o=>o.key));});
+      // Keep the exact publisher download under the existing seven-day source
+      // lifecycle so subsequent model audits reuse this audio and its transcript.
+      await step.do('cleanup',STEP,async()=>{const list=await env.AUDIO.list({prefix:`work/${id}/`,limit:1000});if(list.objects.length)await env.AUDIO.delete(list.objects.map(o=>o.key));});
       return {episode_id:id,ads:normalized.length,removed_seconds:Math.round(removed),candidates,kept_by_review:keptByReview,unreviewed,audit_version:AUDIT_VERSION,audit_passes:coverage.passes};
     }catch(error){
       await step.do('record-failure',async()=>{

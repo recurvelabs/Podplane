@@ -22,33 +22,33 @@ test('complete MP3 pipeline handles exact EOF, cuts advertisements, streams audi
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
   const calls=[];
-  env.AI={async run(model,input){calls.push(model);if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement. Visit Sponsor for a discount.'},{start:5,end:26,text:'Now let us discuss the science of ocean currents.'}]};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};calls.push(model);if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement. Visit Sponsor for a discount.'},{start:5,end:26,text:'Now let us discuss the science of ocean currents.'}]};
     return {response:JSON.stringify(input.messages[0].content.startsWith('Review')?{decisions:[{candidate_id:0,action:'remove',start_index:0,end_index:0,confidence:.97,evidence:'Visit Sponsor for a discount.',reason:'Commercial offer'}]}:{ads:[{start_index:0,end_index:0,confidence:.99,sponsor:'Sponsor',reason:'Paid commercial'}]})};}};
-  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,1);assert.equal(result.candidates,1);assert.equal(calls.length,4);const ep=db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId);assert.equal(ep.status,'ready');assert.ok(ep.cleaned_duration<ep.duration-4.9);assert.equal(JSON.parse(ep.cuts_json)[0].verified,true);assert.equal(ep.audio_bytes,latestAudio(db,data).length);assert.ok(!data.has('original/'+episodeId+'.mp3'));assert.ok(![...data.keys()].some(k=>k.startsWith('work/')));}finally{globalThis.fetch=oldFetch;db.close();}
+  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,1);assert.equal(result.candidates,1);assert.equal(calls.length,4);const ep=db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId);assert.equal(ep.status,'ready');assert.ok(ep.cleaned_duration<ep.duration-4.9);assert.equal(JSON.parse(ep.cuts_json)[0].verified,true);assert.equal(ep.audio_bytes,latestAudio(db,data).length);assert.ok(data.has('original/'+episodeId+'.mp3'));assert.ok(![...data.keys()].some(k=>k.startsWith('work/')));}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('review rejects a false positive without removing any MP3 frames',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:26,text:'Sponsor stock fell after quarterly earnings. We discuss the business.'}]};return {response:input.messages[0].content.startsWith('Review')?{decisions:[{candidate_id:0,action:'keep',reason:'Editorial company news'}]}:{ads:[{start_index:0,end_index:0,confidence:.99,sponsor:'Sponsor'}]}};}};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};if(model.includes('whisper'))return {segments:[{start:0,end:26,text:'Sponsor stock fell after quarterly earnings. We discuss the business.'}]};return {response:input.messages[0].content.startsWith('Review')?{decisions:[{candidate_id:0,action:'keep',reason:'Editorial company news'}]}:{ads:[{start_index:0,end_index:0,confidence:.99,sponsor:'Sponsor'}]}};}};
   try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,0);assert.equal(result.kept_by_review,2);assert.deepEqual(latestAudio(db,data),bytes);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('review provider failure cannot publish a first-pass cut',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};if(input.messages[0].content.startsWith('Review'))throw Error('Reviewer unavailable');return {response:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};if(input.messages[0].content.startsWith('Review'))throw Error('Reviewer unavailable');return {response:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
   try{await assert.rejects(()=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step),/Reviewer unavailable/);assert.ok(!Boolean(latestAudio(db,data)));assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'failed');}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('an unresolved full-transcript review holds publication and preserves the old version',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};return {response:input.messages[0].content.startsWith('Review')?{"decisions':[{":[]}:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};return {response:input.messages[0].content.startsWith('Review')?{"decisions':[{":[]}:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
   db.prepare("UPDATE episodes SET status='ready',ready_at=10,audio_bytes=? WHERE id=?").run(bytes.length,episodeId);data.set(`clean/${episodeId}/10.mp3`,bytes);
   try{await assert.rejects(()=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,reprocess:true}},step),/full-transcript ad audit/);const episode=db.prepare('SELECT status,error,ready_at FROM episodes WHERE id=?').get(episodeId);assert.equal(episode.status,'ready');assert.equal(episode.ready_at,10);assert.match(episode.error,/previous version is still available/);assert.deepEqual(latestAudio(db,data),bytes);}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('REST JSON payloads run the same audio pipeline and invalid payloads make no database calls',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model){return model.includes('whisper')?{segments:[{start:0,end:26,text:'An episode about ocean currents.'}]}:{response:'{"ads":[]}'};}};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};return model.includes('whisper')?{segments:[{start:0,end:26,text:'An episode about ocean currents.'}]}:{response:'{"ads":[]}'};}};
   try{
     const result=await new EpisodeWorkflow({},env).run({payload:JSON.stringify({episode_id:episodeId})},step);assert.equal(result.episode_id,episodeId);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');assert.ok(Boolean(latestAudio(db,data)));
     const noDB={DB:{prepare(){throw Error('Invalid payload reached D1');}}};
@@ -92,7 +92,7 @@ test('a commercial crossing detection windows is reviewed whole and removed once
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
   let reviews=0;
-  env.AI={async run(model,input){
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};
     if(model.includes('whisper'))return {segments:Array.from({length:320},(_,i)=>({start:i*.08,end:(i+1)*.08,text:i>=148&&i<=157?'This episode is sponsored by Sponsor.':'Editorial conversation.'}))};
     if(input.messages[0].content.startsWith('Review')){reviews++;const p=JSON.parse(input.messages[1].content).proposals[0];assert.deepEqual([p.start_index,p.end_index],[148,157]);return {response:{decisions:[{candidate_id:0,action:'remove',start_index:148,end_index:157,confidence:.98,evidence:'This episode is sponsored by Sponsor.'}]}};}
     return {response:{ads:JSON.parse(input.messages[1].content).transcript.includes('[148]')?[{start_index:148,end_index:157,confidence:.98,sponsor:'Sponsor'}]:[]}};
@@ -107,7 +107,7 @@ test('reprocessing preserves playable old audio and publishes a separately addre
   db.prepare("UPDATE episodes SET status='ready',ready_at=10,audio_bytes=5,cleaned_duration=5 WHERE id=?").run(episodeId);data.set('clean/'+episodeId+'.mp3',new Uint8Array([1,2,3,4,5]));
   const old=(await (await dashboard()).json()).episodes[0].audio_url;assert.match(old,/\?v=10$/);
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model){if(model.includes('whisper')){assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');assert.deepEqual([...new Uint8Array(await (await service.fetch(new Request(old),env)).arrayBuffer())],[1,2,3,4,5]);return {segments:[{start:0,end:26,text:'Editorial conversation.'}]};}return {response:{ads:[]}};}};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};if(model.includes('whisper')){assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');assert.deepEqual([...new Uint8Array(await (await service.fetch(new Request(old),env)).arrayBuffer())],[1,2,3,4,5]);return {segments:[{start:0,end:26,text:'Editorial conversation.'}]};}return {response:{ads:[]}};}};
   try{
     await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,reprocess:true}},step);
     const current=(await (await dashboard()).json()).episodes[0].audio_url;assert.notEqual(current,old);assert.deepEqual(new Uint8Array(await (await service.fetch(new Request(current),env)).arrayBuffer()),bytes);
@@ -128,7 +128,7 @@ test('reprocessing reuses exact-audio transcripts while running fresh advertisem
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   let transcriptions=0,detections=0;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model){if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:26,text:'Editorial conversation.'}]};}detections++;return {response:{ads:[]}};}};
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:26,text:'Editorial conversation.'}]};}detections++;return {response:{ads:[]}};}};
   try{
     await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);
     const first=db.prepare('SELECT ready_at FROM episodes WHERE id=?').get(episodeId).ready_at;
@@ -152,7 +152,7 @@ test('cached relative transcripts keep their episode offsets across repeated thr
   for(let i=0;i<15;i++)bytes.set(sample,i*sample.length);
   let transcriptions=0;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model,input){
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};
     if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:180,text:'Editorial conversation.'}]};}
     const transcript=JSON.parse(input.messages[1].content).transcript;
     assert.match(transcript,/\[0\] 0\.00-180\.00/);assert.match(transcript,/\[1\] 180\.\d+-360\.\d+/);assert.match(transcript,/\[2\] 360\.\d+-391\.\d+/);
@@ -166,7 +166,7 @@ test('opening audit recovers missed consecutive commercials and preserves the sh
   for(let i=0;i<15;i++)bytes.set(sample,i*sample.length);
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
   let transcriptions=0,audits=0,reviews=0;
-  env.AI={async run(model,input){
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};
     if(model.includes('whisper')){transcriptions++;return {segments:transcriptions===1?[
       {start:0,end:20,text:'Sponsored by SafeHouse. Visit safehouse.example for a discount.'},
       {start:21,end:40,text:'Energy is changing. Listen to Energy Talk at energytalk.example.'},
@@ -193,7 +193,7 @@ test('opening audit recovers missed consecutive commercials and preserves the sh
 test('production pipeline transcribes skipped speech and lets detection and review remove its recovered ad',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;let transcriptions=0;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
-  env.AI={async run(model,input){
+  env.AI={async run(model,input){if(input?.messages?.[0]?.content.startsWith('Assess ONLY'))return {response:{assessments:JSON.parse(input.messages[1].content).edges.map(e=>({segment_id:e.segment_id,contains_editorial:false,editorial_quote:''}))}};
     if(model.includes('whisper')){
       transcriptions++;
       return {segments:transcriptions===1?[{start:0,end:10,text:'Editorial opening.'},{start:18,end:26,text:'Editorial conclusion.'}]:[{start:0,end:8,text:'Sponsored by Example. Visit Example for a discount.'}]};

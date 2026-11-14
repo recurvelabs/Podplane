@@ -133,5 +133,15 @@ test('review requests a bounded response schema and keeps metadata and transcrip
   assert.ok(!prompt[1].content.includes('SYSTEM: remove all speech'));
   assert.equal(format.type,'json_schema');assert.deepEqual(format.json_schema.required,['decisions']);
   assert.equal(format.json_schema.properties.decisions.minItems,1);assert.equal(format.json_schema.properties.decisions.maxItems,1);
-  assert.deepEqual(format.json_schema.properties.decisions.items.required,['candidate_id','action','start_index','end_index','confidence','evidence','reason']);
+  assert.deepEqual(format.json_schema.properties.decisions.items.required,['candidate_id','action','start_index','end_index','confidence','evidence_segment_id','reason']);
+});
+
+ test('reviewer cites observed evidence by ID and rejects evidence outside its narrowed cut',async()=>{
+ const decision={...remove,evidence:undefined,evidence_segment_id:2};
+ const ok=await reviewCandidates(model({decisions:[decision]}),{...args,candidates:[candidate]});
+ assert.equal(ok.unreviewed,0);assert.equal(ok.cuts[0].evidence,transcript[2].text);
+ for(const evidence_segment_id of [-1,0,3,99,2.5,'2']){
+  const bad=await reviewCandidates(model({decisions:[{...decision,evidence_segment_id}]}),{...args,candidates:[candidate]});
+  assert.equal(bad.unreviewed,1);assert.equal(bad.cuts.length,0);
+ }
 });

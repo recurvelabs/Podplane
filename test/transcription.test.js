@@ -49,3 +49,14 @@ test('VTT fallback and silent audio reuse valid relative timestamps',async()=>{
   silent.env.AI.run=async()=>{throw Error('Silent chunks must be reused');};
   assert.deepEqual(await transcribeAudio(silent.env,bytes,6),[]);
 });
+
+test('boundary word timestamps have a separate cache and fail closed when unavailable',async()=>{
+ const f=environment(),bytes=new Uint8Array([4,5,6]);
+ await transcribeAudio(f.env,bytes,6);
+ await assert.rejects(()=>transcribeAudio(f.env,bytes,6,{words:true}),/no word timestamps/);
+ f.env.AI.run=async()=>({segments:[{start:0,end:5,text:'Terms apply. Back to the show.',words:[{start:0,end:1,word:'Terms'},{start:1,end:2,word:'apply.'},{start:2,end:3,word:'Back'}]}]});
+ const words=await transcribeAudio(f.env,bytes,6,{words:true});
+ assert.equal(words.length,3);assert.equal(words[2].start,2);assert.equal(f.objects.size,2);
+ f.env.AI.run=async()=>{throw Error('Must use word cache');};
+ assert.deepEqual(await transcribeAudio(f.env,bytes,6,{words:true}),words);
+});
