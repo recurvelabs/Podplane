@@ -13,8 +13,8 @@ export async function findBoundaryFindings(ai,{title,transcript,cuts}){
   const targets=new Map(edges.map(id=>{
     const group=transcript[id].boundary_group;
     const cut=cuts.find(c=>c.start_index===id||c.end_index===id);
-    const selected=group===undefined?[transcript[id]]:transcript.slice(cut.start_index,cut.end_index+1).filter(s=>s.boundary_group===group);
-    return [id,{text:selected.map(s=>s.text).join(' '),indices:selected.map(s=>transcript.indexOf(s))}];
+    const selected=group===undefined?[transcript[id]]:transcript.filter(s=>s.boundary_group===group);
+    return [id,{text:selected.map(s=>s.text).join(' '),indices:selected.map(s=>transcript.indexOf(s)),cut_start:cut.start_index,cut_end:cut.end_index}];
   }));
   const schema={type:'object',additionalProperties:false,required:['assessments'],properties:{assessments:{type:'array',minItems:edges.length,maxItems:edges.length,items:{type:'object',additionalProperties:false,required:['segment_id','contains_editorial','editorial_quote'],properties:{segment_id:{type:'integer'},contains_editorial:{type:'boolean'},editorial_quote:{type:'string',maxLength:160}}}}}};
   const r=await infer(ai,
@@ -33,7 +33,10 @@ export async function findBoundaryFindings(ai,{title,transcript,cuts}){
       let offset=0;const matched=[];
       for(const index of target.indices){const length=quoted(transcript[index].text).length;if(offset<at+needle.length&&offset+length>at)matched.push(index);offset+=length+1;}
       if(!matched.length)throw new Error('Boundary evidence has no observed segment');
-      issues.push({segment_id:id,editorial_start_index:matched[0],editorial_end_index:matched.at(-1),evidence:d.editorial_quote});
+      // Classify the complete original phrase, including already-kept words.
+      // Only its overlap with the proposed cut requires protection.
+      const overlap=matched.filter(index=>index>=target.cut_start&&index<=target.cut_end);
+      if(overlap.length)issues.push({segment_id:id,editorial_start_index:overlap[0],editorial_end_index:overlap.at(-1),evidence:d.editorial_quote});
     }
   }
   return issues;

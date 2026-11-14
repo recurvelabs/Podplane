@@ -256,7 +256,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       const gaps=transcriptGaps(transcript,time);let recoveredSegments=0;
       for(let i=0;i<gaps.length;i++){
         const gap=gaps[i];
-        const recovered=await step.do(`transcribe-gap-v10-${i}`,STEP,async()=>{
+        const recovered=await step.do(`transcribe-gap-v11-${i}`,STEP,async()=>{
           const frames=[];
           for(const c of chunks.filter(c=>c.end>gap.start&&c.start<gap.end)){
             const index=await (await env.AUDIO.get(c.key)).json();
@@ -275,7 +275,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       // 150 transcript segments per pass, with overlapping context. IDs make boundaries deterministic.
       for(let i=0;i<transcript.length;i+=150){
         const coreStart=i,coreEnd=Math.min(i+150,transcript.length),lo=Math.max(0,i-20),hi=Math.min(transcript.length,coreEnd+20);
-        const detected=await step.do(`detect-v10-${i}`,STEP,async()=>{
+        const detected=await step.do(`detect-v11-${i}`,STEP,async()=>{
           await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
           return detectCandidates(env.AI,{title:meta.title,transcript,lo,hi,coreStart,coreEnd});
         });proposals.push(...detected);
@@ -286,7 +286,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         const boundary=transcript.findIndex(s=>s.start>=300);
         const coreEnd=Math.min(boundary<0?transcript.length:boundary,180);
         const hi=Math.min(transcript.length,coreEnd+12);
-        proposals.push(...await step.do('detect-opening-v10',STEP,()=>detectCandidates(env.AI,{
+        proposals.push(...await step.do('detect-opening-v11',STEP,()=>detectCandidates(env.AI,{
           title:meta.title,transcript,lo:0,hi,coreStart:0,coreEnd,focus:'opening'
         })));
       }
@@ -294,8 +294,8 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       for(let i=0;i<merged.length;i++){
         const batch=[merged[i]],lo=Math.max(0,merged[i].start_index-12),hi=Math.min(transcript.length,merged[i].end_index+13);
         const review=retry=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi,retry});
-        let reviewed=await step.do(`review-v10-${i}`,STEP,()=>review(false));
-        if(reviewed.unreviewed)reviewed=await step.do(`review-v10-retry-${i}`,STEP,()=>review(true));
+        let reviewed=await step.do(`review-v11-${i}`,STEP,()=>review(false));
+        if(reviewed.unreviewed)reviewed=await step.do(`review-v11-retry-${i}`,STEP,()=>review(true));
         cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
         if(reviewed.unreviewed)pending.push(...batch);
       }

@@ -53,3 +53,15 @@ test('an independent boundary quote repairs a contradictory reviewer range throu
  assert.equal(r.cuts[0].end,7);assert.equal(r.transcript[r.cuts[0].end_index+1].text,'We');
  assert.equal(r.cuts[0].boundary_protection[0].evidence,'We are back.');
 });
+
+test('a partly cut editorial transition is recognized from its full original phrase',async()=>{
+ const transcript=[{start:0,end:2,text:'Sponsored by Example.'},...['Terms','apply.','We','are','going','to','start'].map((text,i)=>({start:2+i,end:3+i,text,boundary_group:1})),{start:9,end:15,text:'with our next guest.'}];
+ const ai={async run(_model,input){
+  const p=JSON.parse(input.messages[1].content);
+  assert.equal(p.edges[1].target_text,'Terms apply. We are going to start');
+  return {response:{assessments:p.edges.map((e,i)=>({segment_id:e.segment_id,contains_editorial:i===1,editorial_quote:i===1?'We are going to start':''}))}};
+ }};
+ const cut={start_index:0,end_index:6,start:0,end:8,confidence:.98};
+ assert.deepEqual(await findBoundaryIssues(ai,{title:'Partial phrase',transcript,cuts:[cut]}),[6]);
+ assert.deepEqual(await findBoundaryIssues(ai,{title:'Protected phrase',transcript,cuts:[{...cut,end_index:2,end:4}]}),[]);
+});

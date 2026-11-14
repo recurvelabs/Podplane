@@ -3,11 +3,11 @@ import {auditTranscript} from './audit.js';
 import {normalizeCuts} from './media.js';
 
 export async function refineBoundaries(ai,{title,transcript,cuts,duration,transcribeSegment,runStep=(_name,fn)=>fn()}){
-  const issues=await runStep('boundary-check-v10',()=>findBoundaryIssues(ai,{title,transcript,cuts}));
+  const issues=await runStep('boundary-check-v11',()=>findBoundaryIssues(ai,{title,transcript,cuts}));
   if(!issues.length)return {transcript,cuts,refined_segments:0,coverage:null};
   const replacements=new Map();
   for(const i of issues){
-    const words=await runStep(`boundary-words-v10-${i}`,()=>transcribeSegment(transcript[i]));
+    const words=await runStep(`boundary-words-v11-${i}`,()=>transcribeSegment(transcript[i]));
     if(!words.length)throw new Error('A mixed ad boundary could not be transcribed precisely');
     replacements.set(i,words.map(s=>({...s,boundary_group:i}))); 
   }
@@ -22,8 +22,8 @@ export async function refineBoundaries(ai,{title,transcript,cuts,duration,transc
     const original=cuts[i],c={...remap(original),reviews:original.reviews?.map(remap)};
     if(!issues.includes(original.start_index)&&!issues.includes(original.end_index)){accepted.push(c);continue;}
     const args={title,transcript:refined,candidates:[c],lo:Math.max(0,c.start_index-4),hi:Math.min(refined.length,c.end_index+5)};
-    let review=await runStep(`boundary-review-v10-${i}`,()=>reviewCandidates(ai,args));
-    if(review.unreviewed)review=await runStep(`boundary-review-retry-v10-${i}`,()=>reviewCandidates(ai,{...args,retry:true}));
+    let review=await runStep(`boundary-review-v11-${i}`,()=>reviewCandidates(ai,args));
+    if(review.unreviewed)review=await runStep(`boundary-review-retry-v11-${i}`,()=>reviewCandidates(ai,{...args,retry:true}));
     accepted.push(...review.cuts);if(review.unreviewed)pending.push(c);
   }
   const passes=[];let current=accepted,unresolved=pending,boundaryRepairs=0;
@@ -33,7 +33,7 @@ export async function refineBoundaries(ai,{title,transcript,cuts,duration,transc
     if(!coverage.converged)throw new Error('The refined-boundary transcript audit did not finish cleanly');
     passes.push(...coverage.passes);
     const final=normalizeCuts([...current,...coverage.cuts],duration);
-    const remaining=await runStep(`boundary-check-final-v10-${round}`,()=>findBoundaryFindings(ai,{title,transcript:refined,cuts:final}));
+    const remaining=await runStep(`boundary-check-final-v11-${round}`,()=>findBoundaryFindings(ai,{title,transcript:refined,cuts:final}));
     if(!remaining.length)return {transcript:refined,cuts:final,refined_segments:issues.length,boundary_repairs:boundaryRepairs,coverage:{passes,converged:true,unreviewed:0}};
     if(round===2)break;
     current=[];unresolved=[];
@@ -52,8 +52,8 @@ export async function refineBoundaries(ai,{title,transcript,cuts,duration,transc
       if(start_index>end_index)continue;
       const candidate={...c,start_index,end_index,start:refined[start_index].start,end:refined[end_index].end};
       const args={title,transcript:refined,candidates:[candidate],lo:Math.max(0,start_index-4),hi:Math.min(refined.length,end_index+5)};
-      let review=await runStep(`boundary-repair-v10-${round}-${i}`,()=>reviewCandidates(ai,args));
-      if(review.unreviewed)review=await runStep(`boundary-repair-retry-v10-${round}-${i}`,()=>reviewCandidates(ai,{...args,retry:true}));
+      let review=await runStep(`boundary-repair-v11-${round}-${i}`,()=>reviewCandidates(ai,args));
+      if(review.unreviewed)review=await runStep(`boundary-repair-retry-v11-${round}-${i}`,()=>reviewCandidates(ai,{...args,retry:true}));
       current.push(...review.cuts.map(c=>({...c,boundary_protection:findings})));if(review.unreviewed)unresolved.push(candidate);
     }
   }
