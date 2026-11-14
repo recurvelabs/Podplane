@@ -66,3 +66,9 @@ The existing staging database already has migrations 002 through 005 applied. Us
 Cloudflare authorization and the two runtime secrets stay in their current services. Connect Codex to the user's Cloudflare account or use an appropriate local login before deploying. Preserve the current secrets; do not export or rotate them as part of this handoff.
 
 Earlier source is versioned by the Sites source repository. The source baseline before these handoff files is `d4cc40ac1ea9dcf085cf145730006420cf114ec6`. GitHub receives a source snapshot for continued development; earlier Sites history remains in its original repository. Runtime credentials, audio, live database rows and generated dependencies are excluded.
+
+## November 13 resource-use update
+
+Worker version `256dbd61-9d20-470b-b4f7-6b7a945ce52c` deployed at 7:30 p.m. Pacific. It reuses exact-audio transcription across retries and reprocessing. `processor/transcription.js` caches validated relative transcript segments at `transcripts/whisper-turbo-v1/<sha256>.json` for 30 days; bump that namespace if the model, options or parsing changes. A `retranscribe:true` operator payload bypasses the cache. Detection and candidate review still run on every reprocess. A new R2 lifecycle rule deletes `transcripts/` objects after 31 days.
+
+The scheduler now deletes all versioned audio for an expired episode, including paginated prefixes. Existing playback remains available within the existing retention window. The active deployment preserves bindings, secrets, the 30-minute refresh schedule, two-job Workflow concurrency, and existing observation sampling. All 68 tests pass; builds and artifact validation pass. Live checks returned healthy service output, the normal home page and a sign-in rejection for anonymous account access.
