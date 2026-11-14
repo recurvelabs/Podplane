@@ -26,3 +26,14 @@ test('uncertain boundary timing holds publication; fabricated segment IDs cannot
   await assert.rejects(()=>refineBoundaries(ai,{title:'No timestamps',transcript,cuts,duration:10,transcribeSegment:async()=>[]}),/could not be transcribed/);
   await assert.rejects(()=>findBoundaryIssues({async run(){return {response:{assessments:[{segment_id:99,contains_editorial:true,editorial_quote:'Back to the show.'}]}};}},{title:'Invalid IDs',transcript,cuts}),/omitted a verdict/);
 });
+
+test('final boundary checks read word-timed editorial phrases together',async()=>{
+ const transcript=[{start:0,end:2,text:'Sponsored by Example.'},...['Terms','apply.','We','are','going','to','start'].map((text,i)=>({start:2+i,end:3+i,text,boundary_group:1}))];
+ const cuts=[{start_index:0,end_index:7,start:0,end:9,confidence:.98}];
+ const ai={async run(_model,input){
+  const p=JSON.parse(input.messages[1].content);
+  assert.equal(p.edges[1].target_text,'Terms apply. We are going to start');
+  return {response:{assessments:p.edges.map(e=>({segment_id:e.segment_id,contains_editorial:e.segment_id===7,editorial_quote:e.segment_id===7?'We are going to start':''}))}};
+ }};
+ assert.deepEqual(await findBoundaryIssues(ai,{title:'Word boundary',transcript,cuts}),[7]);
+});

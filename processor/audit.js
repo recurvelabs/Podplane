@@ -1,6 +1,6 @@
 import {detectCandidates,mergeCandidates,reviewCandidates} from './detection.js';
 
-export const AUDIT_VERSION='full-transcript-v3-boundaries';
+export const AUDIT_VERSION='full-transcript-v4-word-context';
 const WINDOW=120,CONTEXT=30,MAX_PASSES=3;
 
 // Use time coverage rather than merged metadata: a cut's original end_index
@@ -32,7 +32,7 @@ export async function auditTranscript(ai,{title,transcript,cuts,pending=[],runSt
       const coreEnd=Math.min(transcript.length,coreStart+WINDOW);
       if(before.slice(coreStart,coreEnd).every(Boolean))continue;
       const lo=Math.max(0,coreStart-CONTEXT),hi=Math.min(transcript.length,coreEnd+CONTEXT);
-      const found=await runStep(`audit-v7-${pass}-${coreStart}`,()=>detectCandidates(ai,{
+      const found=await runStep(`audit-v8-${pass}-${coreStart}`,()=>detectCandidates(ai,{
         title,transcript,lo,hi,coreStart,coreEnd,focus:'residual',cuts:accepted
       }));
       proposals.push(...found.filter(c=>before.slice(Math.max(coreStart,c.start_index),Math.min(coreEnd,c.end_index+1)).some(x=>!x)));
@@ -42,8 +42,8 @@ export async function auditTranscript(ai,{title,transcript,cuts,pending=[],runSt
     let passUnreviewed=0;
     for(let i=0;i<merged.length;i++){
       const c=merged[i],args={title,transcript,candidates:[c],lo:Math.max(0,c.start_index-12),hi:Math.min(transcript.length,c.end_index+13)};
-      let reviewed=await runStep(`audit-review-v7-${pass}-${i}`,()=>reviewCandidates(ai,args));
-      if(reviewed.unreviewed)reviewed=await runStep(`audit-review-retry-v7-${pass}-${i}`,()=>reviewCandidates(ai,{...args,retry:true}));
+      let reviewed=await runStep(`audit-review-v8-${pass}-${i}`,()=>reviewCandidates(ai,args));
+      if(reviewed.unreviewed)reviewed=await runStep(`audit-review-retry-v8-${pass}-${i}`,()=>reviewCandidates(ai,{...args,retry:true}));
       accepted.push(...reviewed.cuts);candidates++;kept+=reviewed.kept;passUnreviewed+=reviewed.unreviewed;
       if(reviewed.unreviewed)pending.push(c);
     }
