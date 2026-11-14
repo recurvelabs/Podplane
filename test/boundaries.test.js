@@ -37,3 +37,19 @@ test('final boundary checks read word-timed editorial phrases together',async()=
  }};
  assert.deepEqual(await findBoundaryIssues(ai,{title:'Word boundary',transcript,cuts}),[7]);
 });
+
+test('an independent boundary quote repairs a contradictory reviewer range through production review',async()=>{
+ const transcript=[{start:0,end:5,text:'Sponsored by Example.'},{start:5,end:10,text:'Terms apply. We are back.'},{start:10,end:20,text:'Our next topic.'}];
+ const cuts=[{start_index:0,end_index:1,start:0,end:10,confidence:.98,sponsor:'Example'}];
+ let reviews=0,audits=0;
+ const ai={async run(_model,input){
+  const p=JSON.parse(input.messages[1].content);
+  if(p.edges)return {response:{assessments:p.edges.map(e=>({segment_id:e.segment_id,contains_editorial:e.target_text.includes('We are back.'),editorial_quote:e.target_text.includes('We are back.')?'We are back.':''}))}};
+  if(p.proposals){reviews++;const c=p.proposals[0];return {response:{decisions:[{candidate_id:0,action:'remove',start_index:c.start_index,end_index:c.end_index,confidence:.99,evidence_segment_id:0,reason:'Sponsor read'}]}};}
+  audits++;return {response:{ads:[]}};
+ }};
+ const r=await refineBoundaries(ai,{title:'Contradictory indices',transcript,cuts,duration:20,transcribeSegment:async()=>['Terms','apply.','We','are','back.'].map((text,i)=>({start:5+i,end:6+i,text}))});
+ assert.equal(reviews,2);assert.equal(audits,2);assert.equal(r.boundary_repairs,1);
+ assert.equal(r.cuts[0].end,7);assert.equal(r.transcript[r.cuts[0].end_index+1].text,'We');
+ assert.equal(r.cuts[0].boundary_protection[0].evidence,'We are back.');
+});
