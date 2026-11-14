@@ -52,7 +52,7 @@ test('review quotes must come from the final narrowed range',async()=>{
   const result=await reviewCandidates(model({decisions:[{...remove,end_index:1}]}),{...args,candidates:[candidate]});
   assert.deepEqual(result,{cuts:[],kept:1,unreviewed:1});
 });
-test('review accepts GPT-OSS final content and strips only a real in-range timestamp prefix',async()=>{
+test('review accepts chat-completions final content and strips only a real in-range timestamp prefix',async()=>{
   const decision={...remove,evidence:'[2] 20.00-30.00 Use code OCEAN for a discount'};
   const ai={async run(){return {choices:[{message:{content:JSON.stringify({decisions:[decision]}),reasoning_content:'Ignored model reasoning'}}]};}};
   const accepted=await reviewCandidates(ai,{...args,candidates:[candidate]});
