@@ -2,8 +2,9 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { Buffer } from 'node:buffer';
 import { parseFeed, publicURL, safeFetch, boundedText, rss, combinedEpisodeTitle } from './feeds.js';
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
-import { detectCandidates, mergeCandidates, reviewCandidates, auditOpeningGaps } from './detection.js';
-import { transcribeAudio } from './transcription.js';
+import { detectCandidates, mergeCandidates, reviewCandidates } from './detection.js';
+import { auditTranscript, AUDIT_VERSION } from './audit.js';
+import { transcribeAudio, transcriptGaps } from './transcription.js';
 
 const NOW=()=>Math.floor(Date.now()/1000);
 const ORIGIN='https://podplane-audio.dchalloner.workers.dev';
@@ -248,11 +249,31 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
           return segments;
         });transcript.push(...segments);
       }
-      const cuts=[],proposals=[];let candidates=0,keptByReview=0,unreviewed=0;
+      // Whisper can omit speech inside a long chunk. Re-transcribe every long
+      // uncovered interval as a short, frame-aligned clip before classifying it.
+      const gaps=transcriptGaps(transcript,time);let recoveredSegments=0;
+      for(let i=0;i<gaps.length;i++){
+        const gap=gaps[i];
+        const recovered=await step.do(`transcribe-gap-v5-${i}`,STEP,async()=>{
+          const frames=[];
+          for(const c of chunks.filter(c=>c.end>gap.start&&c.start<gap.end)){
+            const index=await (await env.AUDIO.get(c.key)).json();
+            frames.push(...index.frames.filter(f=>f[2]>=gap.start-1e-8&&f[2]+f[3]<=gap.end+1e-8));
+          }
+          if(!frames.length)return [];
+          const first=frames[0],last=frames.at(-1),duration=last[2]+last[3]-first[2];
+          const object=await env.AUDIO.get(meta.key,{range:{offset:first[0],length:last[0]+last[1]-first[0]}});
+          const relative=await transcribeAudio(env,new Uint8Array(await object.arrayBuffer()),duration);
+          return relative.map(s=>({...s,start:first[2]+s.start,end:Math.min(last[2]+last[3],first[2]+s.end)})).filter(s=>s.end>s.start);
+        });
+        transcript.push(...recovered);recoveredSegments+=recovered.length;
+      }
+      transcript.sort((a,b)=>a.start-b.start||a.end-b.end);
+      const cuts=[],proposals=[],pending=[];let candidates=0,keptByReview=0,unreviewed=0;
       // 150 transcript segments per pass, with overlapping context. IDs make boundaries deterministic.
       for(let i=0;i<transcript.length;i+=150){
         const coreStart=i,coreEnd=Math.min(i+150,transcript.length),lo=Math.max(0,i-20),hi=Math.min(transcript.length,coreEnd+20);
-        const detected=await step.do(`detect-v4-${i}`,STEP,async()=>{
+        const detected=await step.do(`detect-v5-${i}`,STEP,async()=>{
           await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
           return detectCandidates(env.AI,{title:meta.title,transcript,lo,hi,coreStart,coreEnd});
         });proposals.push(...detected);
@@ -263,7 +284,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         const boundary=transcript.findIndex(s=>s.start>=300);
         const coreEnd=Math.min(boundary<0?transcript.length:boundary,180);
         const hi=Math.min(transcript.length,coreEnd+12);
-        proposals.push(...await step.do('detect-opening-v4',STEP,()=>detectCandidates(env.AI,{
+        proposals.push(...await step.do('detect-opening-v5',STEP,()=>detectCandidates(env.AI,{
           title:meta.title,transcript,lo:0,hi,coreStart:0,coreEnd,focus:'opening'
         })));
       }
@@ -271,12 +292,15 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       for(let i=0;i<merged.length;i++){
         const batch=[merged[i]],lo=Math.max(0,merged[i].start_index-12),hi=Math.min(transcript.length,merged[i].end_index+13);
         const review=retry=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi,retry});
-        let reviewed=await step.do(`review-v4-${i}`,STEP,()=>review(false));
-        if(reviewed.unreviewed)reviewed=await step.do(`review-v4-retry-${i}`,STEP,()=>review(true));
+        let reviewed=await step.do(`review-v5-${i}`,STEP,()=>review(false));
+        if(reviewed.unreviewed)reviewed=await step.do(`review-v5-retry-${i}`,STEP,()=>review(true));
         cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
+        if(reviewed.unreviewed)pending.push(...batch);
       }
-      const audit=await step.do('audit-opening-gaps-v4',STEP,()=>auditOpeningGaps(env.AI,{title:meta.title,transcript,cuts}));
-      cuts.push(...audit.cuts);candidates+=audit.candidates;keptByReview+=audit.kept;unreviewed+=audit.unreviewed;
+      const coverage=await auditTranscript(env.AI,{title:meta.title,transcript,cuts,pending,
+        runStep:(name,fn)=>step.do(name,STEP,fn)});
+      cuts.push(...coverage.cuts);candidates+=coverage.candidates;keptByReview+=coverage.kept;unreviewed=coverage.unreviewed;
+      if(!coverage.converged)throw new Error('The full-transcript ad audit did not finish cleanly. This episode was held for another review.');
       const normalized=normalizeCuts(cuts,time),removed=normalized.reduce((n,c)=>n+c.end-c.start,0);
       if(removed>time*0.4)throw new Error('More than 40% was marked as ads. This episode was held to protect the conversation.');
       const reviewNotice=unreviewed?'Some possible ads were left in this episode because their review was incomplete.':null;
@@ -289,10 +313,13 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         const write=(async()=>{try{for(const range of ranges){const o=await env.AUDIO.get(meta.key,{range});const reader=o.body.getReader();try{for(;;){const {done,value}=await reader.read();if(done)break;await writer.write(value);}}finally{reader.releaseLock();}}await writer.close();}catch(e){await writer.abort(e);throw e;}})();
         const publishedAt=Math.max(NOW(),Number((await env.DB.prepare('SELECT ready_at FROM episodes WHERE id=?').bind(id).first())?.ready_at||0)+1);
         await Promise.all([env.AUDIO.put(`clean/${id}/${publishedAt}.mp3`,fixed.readable,{httpMetadata:{contentType:'audio/mpeg'}}),write]);
+        await env.AUDIO.put(`clean/${id}/${publishedAt}.audit.json`,JSON.stringify({version:AUDIT_VERSION,
+          episode_id:id,workflow_id:event.instanceId||null,source_bytes:meta.size,source_duration:time,
+          transcript,cuts:normalized,transcription_gaps:{checked:gaps.length,recovered_segments:recoveredSegments},coverage:{passes:coverage.passes,converged:coverage.converged,unreviewed}}),{httpMetadata:{contentType:'application/json'}});
         await env.DB.prepare("UPDATE episodes SET status='ready',progress=100,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=? WHERE id=?").bind(duration,size,JSON.stringify(normalized),publishedAt,reviewNotice,id).run();
       });
       await step.do('cleanup',STEP,async()=>{await env.AUDIO.delete(meta.key);const list=await env.AUDIO.list({prefix:`work/${id}/`,limit:1000});if(list.objects.length)await env.AUDIO.delete(list.objects.map(o=>o.key));});
-      return {episode_id:id,ads:normalized.length,removed_seconds:Math.round(removed),candidates,kept_by_review:keptByReview,unreviewed};
+      return {episode_id:id,ads:normalized.length,removed_seconds:Math.round(removed),candidates,kept_by_review:keptByReview,unreviewed,audit_version:AUDIT_VERSION,audit_passes:coverage.passes};
     }catch(error){
       await step.do('record-failure',async()=>{
         if(preserveReady)await env.DB.prepare("UPDATE episodes SET progress=100,error=? WHERE id=? AND status='ready'").bind('Audio refresh failed; the previous version is still available. '+String(error.message||'').slice(0,250),id).run();

@@ -42,6 +42,7 @@ export function normalizeCuts(cuts,duration){
     const last=out.at(-1);
     if(last&&c.start<=last.end){
       last.end=Math.max(last.end,c.end);last.confidence=Math.min(last.confidence,c.confidence);
+      if(Number.isInteger(c.end_index))last.end_index=Math.max(last.end_index??c.end_index,c.end_index);
       last.sponsor=[...new Set([last.sponsor,c.sponsor])].filter(Boolean).join(', ');
       if(c.reviews)last.reviews=[...(last.reviews||[]),...c.reviews];
     }else out.push({...c});

@@ -33,7 +33,7 @@ The cloud resources continue running independently of this source handoff. This 
 - Completed audio is cached once and reused across accounts. Accounts receive private combined and per-show RSS feeds. Combined feeds prefix episode titles with short show names; per-show titles, episode GUIDs and audio enclosures are preserved.
 - The owner account has `accounts.unlimited=1` in the existing live database. The source has no email-based privilege shortcut. Existing email/passkey sessions read the entitlement from D1.
 - Unlimited access removes show-count, add/refresh/retry and daily processing allowances, plus the beta episode size/duration caps. Standard users retain the usual limits.
-- The validated suite has 71 passing tests, including WebAuthn signatures, email-code replay/expiry, catalog imports without processing, account isolation, unlimited entitlements, candidate review, cross-window ad breaks, opening-ad and tagline recovery, incomplete-review recovery, transcript caching, audio expiration, preservation of playback during a refresh and combined-feed title prefixes.
+- The validated suite has 77 passing tests, including WebAuthn signatures, email-code replay/expiry, catalog imports without processing, account isolation, unlimited entitlements, candidate review, cross-window ad breaks, opening-ad and tagline recovery, incomplete-review recovery, transcript caching, audio expiration, preservation of playback during a refresh and combined-feed title prefixes.
 
 ## Processing and costs
 
@@ -72,3 +72,12 @@ Earlier source is versioned by the Sites source repository. The source baseline 
 Worker version `256dbd61-9d20-470b-b4f7-6b7a945ce52c` deployed at 7:30 p.m. Pacific. It reuses exact-audio transcription across retries and reprocessing. `processor/transcription.js` caches validated relative transcript segments at `transcripts/whisper-turbo-v1/<sha256>.json` for 30 days; bump that namespace if the model, options or parsing changes. A `retranscribe:true` operator payload bypasses the cache. Detection and candidate review still run on every reprocess. A new R2 lifecycle rule deletes `transcripts/` objects after 31 days.
 
 The scheduler now deletes all versioned audio for an expired episode, including paginated prefixes. Existing playback remains available within the existing retention window. The active deployment preserves bindings, secrets, the 30-minute refresh schedule, two-job Workflow concurrency, and existing observation sampling. All 68 tests pass; builds and artifact validation pass. Live checks returned healthy service output, the normal home page and a sign-in rejection for anonymous account access.
+
+
+## November 14 full-transcript audit update
+
+The active Worker uses Llama 3.3 70B for first-pass detection and GPT-OSS 120B for independent candidate review and the full-transcript residual audit. `processor/audit.js` scans all retained segments with overlapping context, reviews proposed repairs, and repeats until a pass adds no cuts. Three unsuccessful passes hold publication. Invalid initial reviews stay pending across passes. Every cut still requires valid indices, confidence thresholds and an exact supporting quote.
+
+The transcription stage rechecks gaps of at least six seconds using short frame-aligned source clips. This addresses missing sponsor speech inside otherwise successful three-minute transcriptions. Published audio has an adjacent private audit JSON with the matching transcript and cut decisions; source audio and working indexes are deleted as before. The new records use the existing `clean/` lifecycle and expiration cleanup.
+
+Worker version `bf7e21e8-9a5b-40eb-a146-0db575f7c46d` was deployed on November 14 at 22:28 UTC. All 77 tests and both builds passed. The service health endpoint returned 200 and anonymous dashboard access remained protected. The six requested PSA/Pivot episodes are being reprocessed through this production pipeline; results belong in `docs/TRANSCRIPT_AUDIT.md` after verification.

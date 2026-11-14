@@ -5,6 +5,13 @@ const MODEL='@cf/openai/whisper-large-v3-turbo';
 const CACHE_PREFIX='transcripts/whisper-turbo-v1/';
 const CACHE_SECONDS=30*86400;
 
+export function transcriptGaps(segments,duration,{minimum=6,maximum=90}={}){
+  const gaps=[];let end=0;
+  const add=(start,stop)=>{if(stop-start<minimum)return;for(let p=start;p<stop;p+=maximum)gaps.push({start:p,end:Math.min(stop,p+maximum)});};
+  for(const s of [...segments].sort((a,b)=>a.start-b.start)){add(end,Math.min(s.start,duration));end=Math.max(end,s.end);}
+  add(end,duration);return gaps;
+}
+
 function segmentsOf(result,duration){
   let segments=(result.segments||[]).map(s=>({start:Number(s.start),end:Number(s.end),text:String(s.text||'')}));
   if(!segments.length&&result.vtt){const re=/(\d{2}:)?(\d{2}):(\d{2})\.(\d{3}) --> (\d{2}:)?(\d{2}):(\d{2})\.(\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|$)/g;let m;while((m=re.exec(result.vtt))){const secs=(h,m,s,ms)=>(parseInt(h||'0')*3600)+Number(m)*60+Number(s)+Number(ms)/1000;segments.push({start:secs(m[1],m[2],m[3],m[4]),end:secs(m[5],m[6],m[7],m[8]),text:m[9].trim()});}}

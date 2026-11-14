@@ -24,13 +24,13 @@ test('complete MP3 pipeline handles exact EOF, cuts advertisements, streams audi
   const calls=[];
   env.AI={async run(model,input){calls.push(model);if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement. Visit Sponsor for a discount.'},{start:5,end:26,text:'Now let us discuss the science of ocean currents.'}]};
     return {response:JSON.stringify(input.messages[0].content.startsWith('Review')?{decisions:[{candidate_id:0,action:'remove',start_index:0,end_index:0,confidence:.97,evidence:'Visit Sponsor for a discount.',reason:'Commercial offer'}]}:{ads:[{start_index:0,end_index:0,confidence:.99,sponsor:'Sponsor',reason:'Paid commercial'}]})};}};
-  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,1);assert.equal(result.candidates,1);assert.equal(calls.length,3);const ep=db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId);assert.equal(ep.status,'ready');assert.ok(ep.cleaned_duration<ep.duration-4.9);assert.equal(JSON.parse(ep.cuts_json)[0].verified,true);assert.equal(ep.audio_bytes,latestAudio(db,data).length);assert.ok(!data.has('original/'+episodeId+'.mp3'));assert.ok(![...data.keys()].some(k=>k.startsWith('work/')));}finally{globalThis.fetch=oldFetch;db.close();}
+  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,1);assert.equal(result.candidates,1);assert.equal(calls.length,4);const ep=db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId);assert.equal(ep.status,'ready');assert.ok(ep.cleaned_duration<ep.duration-4.9);assert.equal(JSON.parse(ep.cuts_json)[0].verified,true);assert.equal(ep.audio_bytes,latestAudio(db,data).length);assert.ok(!data.has('original/'+episodeId+'.mp3'));assert.ok(![...data.keys()].some(k=>k.startsWith('work/')));}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('review rejects a false positive without removing any MP3 frames',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
   env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:26,text:'Sponsor stock fell after quarterly earnings. We discuss the business.'}]};return {response:input.messages[0].content.startsWith('Review')?{decisions:[{candidate_id:0,action:'keep',reason:'Editorial company news'}]}:{ads:[{start_index:0,end_index:0,confidence:.99,sponsor:'Sponsor'}]}};}};
-  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,0);assert.equal(result.kept_by_review,1);assert.deepEqual(latestAudio(db,data),bytes);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');}finally{globalThis.fetch=oldFetch;db.close();}
+  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,0);assert.equal(result.kept_by_review,2);assert.deepEqual(latestAudio(db,data),bytes);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('review provider failure cannot publish a first-pass cut',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
@@ -38,11 +38,12 @@ test('review provider failure cannot publish a first-pass cut',async()=>{
   env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};if(input.messages[0].content.startsWith('Review'))throw Error('Reviewer unavailable');return {response:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
   try{await assert.rejects(()=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step),/Reviewer unavailable/);assert.ok(!Boolean(latestAudio(db,data)));assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'failed');}finally{globalThis.fetch=oldFetch;db.close();}
 });
-test('incomplete review finishes with a notice and keeps every unreviewed audio frame',async()=>{
+test('an unresolved full-transcript review holds publication and preserves the old version',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
   env.AI={async run(model,input){if(model.includes('whisper'))return {segments:[{start:0,end:5,text:'This is a paid advertisement for Sponsor.'},{start:5,end:26,text:'Ocean science.'}]};return {response:input.messages[0].content.startsWith('Review')?{"decisions':[{":[]}:{ads:[{start_index:0,end_index:0,confidence:.99}]}};}};
-  try{const result=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(result.ads,0);assert.equal(result.unreviewed,1);const episode=db.prepare('SELECT status,error FROM episodes WHERE id=?').get(episodeId);assert.equal(episode.status,'ready');assert.match(episode.error,/possible ads were left/);assert.deepEqual(latestAudio(db,data),bytes);}finally{globalThis.fetch=oldFetch;db.close();}
+  db.prepare("UPDATE episodes SET status='ready',ready_at=10,audio_bytes=? WHERE id=?").run(bytes.length,episodeId);data.set(`clean/${episodeId}/10.mp3`,bytes);
+  try{await assert.rejects(()=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,reprocess:true}},step),/full-transcript ad audit/);const episode=db.prepare('SELECT status,error,ready_at FROM episodes WHERE id=?').get(episodeId);assert.equal(episode.status,'ready');assert.equal(episode.ready_at,10);assert.match(episode.error,/previous version is still available/);assert.deepEqual(latestAudio(db,data),bytes);}finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('REST JSON payloads run the same audio pipeline and invalid payloads make no database calls',async()=>{
   const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
@@ -132,7 +133,7 @@ test('reprocessing reuses exact-audio transcripts while running fresh advertisem
     await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);
     const first=db.prepare('SELECT ready_at FROM episodes WHERE id=?').get(episodeId).ready_at;
     await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,reprocess:true}},step);
-    assert.equal(transcriptions,1);assert.equal(detections,2);assert.deepEqual(latestAudio(db,data),bytes);
+    assert.equal(transcriptions,1);assert.equal(detections,4);assert.deepEqual(latestAudio(db,data),bytes);
     assert.ok(db.prepare('SELECT ready_at FROM episodes WHERE id=?').get(episodeId).ready_at>first);
     assert.ok(data.has(`clean/${episodeId}/${first}.mp3`));assert.ok([...data.keys()].some(k=>k.startsWith('transcripts/')));
     assert.ok(![...data.keys()].some(k=>k.startsWith('work/')));
@@ -152,9 +153,9 @@ test('cached relative transcripts keep their episode offsets across repeated thr
   let transcriptions=0;
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
   env.AI={async run(model,input){
-    if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:5,text:'Editorial conversation.'}]};}
+    if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:180,text:'Editorial conversation.'}]};}
     const transcript=JSON.parse(input.messages[1].content).transcript;
-    assert.match(transcript,/\[0\] 0\.00-5\.00/);assert.match(transcript,/\[1\] 180\.\d+-185\.\d+/);assert.match(transcript,/\[2\] 360\.\d+-365\.\d+/);
+    assert.match(transcript,/\[0\] 0\.00-180\.00/);assert.match(transcript,/\[1\] 180\.\d+-360\.\d+/);assert.match(transcript,/\[2\] 360\.\d+-391\.\d+/);
     return {response:{ads:[]}};
   }};
   try{await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(transcriptions,2);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');}finally{globalThis.fetch=oldFetch;db.close();}
@@ -186,5 +187,28 @@ test('opening audit recovers missed consecutive commercials and preserves the sh
     assert.equal(audits,1);assert.equal(reviews,2);assert.equal(r.unreviewed,0);assert.equal(r.ads,1);
     const cuts=JSON.parse(db.prepare('SELECT cuts_json FROM episodes WHERE id=?').get(episodeId).cuts_json);
     assert.deepEqual([cuts[0].start,cuts[0].end],[0,65]);assert.ok(latestAudio(db,data).length>0);
+  }finally{globalThis.fetch=oldFetch;db.close();}
+});
+
+test('production pipeline transcribes skipped speech and lets detection and review remove its recovered ad',async()=>{
+  const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;let transcriptions=0;
+  globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
+  env.AI={async run(model,input){
+    if(model.includes('whisper')){
+      transcriptions++;
+      return {segments:transcriptions===1?[{start:0,end:10,text:'Editorial opening.'},{start:18,end:26,text:'Editorial conclusion.'}]:[{start:0,end:8,text:'Sponsored by Example. Visit Example for a discount.'}]};
+    }
+    const p=JSON.parse(input.messages[1].content);
+    return {response:p.proposals?{decisions:[{candidate_id:0,action:'remove',start_index:1,end_index:1,confidence:.98,evidence:'Visit Example for a discount.'}]}:{ads:[{start_index:1,end_index:1,confidence:.98,sponsor:'Example'}]}};
+  }};
+  try{
+    const r=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);
+    assert.equal(transcriptions,2);assert.equal(r.ads,1);assert.equal(r.unreviewed,0);
+    const ep=db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId);
+    const audit=JSON.parse(new TextDecoder().decode(data.get(`clean/${episodeId}/${ep.ready_at}.audit.json`)));
+    assert.deepEqual(audit.transcription_gaps,{checked:1,recovered_segments:1});
+    assert.equal(audit.transcript[0].text,'Editorial opening.');assert.equal(audit.transcript[2].text,'Editorial conclusion.');
+    assert.ok(ep.duration-ep.cleaned_duration>7.9);assert.ok(ep.duration-ep.cleaned_duration<=8);
+    assert.equal(audit.coverage.converged,true);
   }finally{globalThis.fetch=oldFetch;db.close();}
 });
