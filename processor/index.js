@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { Buffer } from 'node:buffer';
 import { parseFeed, publicURL, safeFetch, boundedText, rss, combinedEpisodeTitle } from './feeds.js';
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
-import { detectCandidates, mergeCandidates, reviewCandidates } from './detection.js';
+import { detectCandidates, mergeCandidates, reviewCandidates, auditOpeningGaps } from './detection.js';
 import { transcribeAudio } from './transcription.js';
 
 const NOW=()=>Math.floor(Date.now()/1000);
@@ -252,19 +252,31 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       // 150 transcript segments per pass, with overlapping context. IDs make boundaries deterministic.
       for(let i=0;i<transcript.length;i+=150){
         const coreStart=i,coreEnd=Math.min(i+150,transcript.length),lo=Math.max(0,i-20),hi=Math.min(transcript.length,coreEnd+20);
-        const detected=await step.do(`detect-v3-${i}`,STEP,async()=>{
+        const detected=await step.do(`detect-v4-${i}`,STEP,async()=>{
           await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
           return detectCandidates(env.AI,{title:meta.title,transcript,lo,hi,coreStart,coreEnd});
         });proposals.push(...detected);
       }
+      // Opening ad pods often chain trailers and anecdotal sponsor reads. Give
+      // the first five minutes a focused pass, then review all proposals normally.
+      if(transcript.at(-1)?.end>300){
+        const boundary=transcript.findIndex(s=>s.start>=300);
+        const coreEnd=Math.min(boundary<0?transcript.length:boundary,180);
+        const hi=Math.min(transcript.length,coreEnd+12);
+        proposals.push(...await step.do('detect-opening-v4',STEP,()=>detectCandidates(env.AI,{
+          title:meta.title,transcript,lo:0,hi,coreStart:0,coreEnd,focus:'opening'
+        })));
+      }
       const merged=mergeCandidates(transcript,proposals);candidates=merged.length;
       for(let i=0;i<merged.length;i++){
         const batch=[merged[i]],lo=Math.max(0,merged[i].start_index-12),hi=Math.min(transcript.length,merged[i].end_index+13);
-        const review=()=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi});
-        let reviewed=await step.do(`review-v3-${i}`,STEP,review);
-        if(reviewed.unreviewed)reviewed=await step.do(`review-v3-retry-${i}`,STEP,review);
+        const review=retry=>reviewCandidates(env.AI,{title:meta.title,transcript,candidates:batch,lo,hi,retry});
+        let reviewed=await step.do(`review-v4-${i}`,STEP,()=>review(false));
+        if(reviewed.unreviewed)reviewed=await step.do(`review-v4-retry-${i}`,STEP,()=>review(true));
         cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
       }
+      const audit=await step.do('audit-opening-gaps-v4',STEP,()=>auditOpeningGaps(env.AI,{title:meta.title,transcript,cuts}));
+      cuts.push(...audit.cuts);candidates+=audit.candidates;keptByReview+=audit.kept;unreviewed+=audit.unreviewed;
       const normalized=normalizeCuts(cuts,time),removed=normalized.reduce((n,c)=>n+c.end-c.start,0);
       if(removed>time*0.4)throw new Error('More than 40% was marked as ads. This episode was held to protect the conversation.');
       const reviewNotice=unreviewed?'Some possible ads were left in this episode because their review was incomplete.':null;

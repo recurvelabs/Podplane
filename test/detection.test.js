@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {detectCandidates,mergeCandidates,reviewCandidates,REVIEW_BATCH_SIZE} from '../processor/detection.js';
+import {detectCandidates,mergeCandidates,reviewCandidates,auditOpeningGaps,REVIEW_BATCH_SIZE} from '../processor/detection.js';
 
 const transcript=[
   {start:0,end:10,text:'Welcome back. We discussed Sponsor in the news.'},
@@ -51,6 +51,37 @@ test('review preserves audio on expanded bounds, low confidence or unsupported e
 test('review quotes must come from the final narrowed range',async()=>{
   const result=await reviewCandidates(model({decisions:[{...remove,end_index:1}]}),{...args,candidates:[candidate]});
   assert.deepEqual(result,{cuts:[],kept:1,unreviewed:1});
+});
+test('consecutive opening ads cannot borrow evidence from a neighboring sponsor',async()=>{
+  const t=[
+    {start:0,end:60,text:'Sponsored by SafeHouse. Visit safehouse.example for a discount.'},
+    {start:61,end:90,text:'Energy demand is rising. Listen to our new Energy Talk podcast.'},
+    {start:90,end:120,text:'Visit energytalk.example today.'},
+    {start:121,end:150,text:'The holidays remind me of family meals around the table.'},
+    {start:150,end:195,text:'Grab Fizz soda on your next grocery run. Enjoy Fizz.'},
+    {start:216,end:240,text:'Welcome to the show. Today we discuss election results.'}
+  ];
+  const c={start_index:3,end_index:4,start:121,end:195,confidence:.98,sponsor:'Fizz'};
+  let input;
+  const ai={async run(_,request){input=JSON.parse(request.messages[1].content);return {response:{decisions:[{candidate_id:0,action:'remove',start_index:3,end_index:4,confidence:.98,evidence:'Visit energytalk.example today.',reason:'Ad'}]}};}};
+  const rejected=await reviewCandidates(ai,{title:'Opening regression',transcript:t,candidates:[c],lo:0,hi:6});
+  assert.equal(rejected.unreviewed,1);assert.equal(rejected.cuts.length,0);
+  assert.ok(!input.proposals[0].candidate_transcript.includes('Energy Talk'));
+  assert.ok(input.proposals[0].context_before.includes('Energy Talk'));
+  const accepted=await reviewCandidates(model({decisions:[{candidate_id:0,action:'remove',start_index:3,end_index:4,confidence:.98,evidence:'Grab Fizz soda on your next grocery run.',reason:'Commercial endorsement'}]}),{title:'Opening regression',transcript:t,candidates:[c],lo:0,hi:6,retry:true});
+  assert.equal(accepted.unreviewed,0);assert.equal(accepted.cuts[0].start,121);assert.equal(accepted.cuts[0].end,195);
+});
+test('opening-gap audit requires detection and review of a missed tagline and preserves editorial gaps',async()=>{
+  const t=[{start:0,end:60,text:'This is sponsored by SafeHouse.'},{start:61,end:62,text:'Ahead of crime in real time.'},{start:63,end:95,text:'Visit your local pharmacy, sponsored by CVS.'}];
+  const cuts=[{start_index:0,end_index:0,start:0,end:60,confidence:.98},{start_index:2,end_index:2,start:63,end:95,confidence:.98}];
+  let calls=0;
+  const ai={async run(_,input){calls++;return {response:input.messages[0].content.startsWith('Review')?{decisions:[{candidate_id:0,action:'remove',start_index:0,end_index:1,confidence:.98,evidence:'Ahead of crime in real time.',reason:'Closing sponsor tagline'}]}:{ads:[{start_index:0,end_index:1,confidence:.98,sponsor:'SafeHouse'}]}};}};
+  const r=await auditOpeningGaps(ai,{title:'Tagline regression',transcript:t,cuts});
+  assert.equal(calls,2);assert.equal(r.cuts[0].end,62);assert.equal(r.unreviewed,0);
+  const editorial=await auditOpeningGaps(model({ads:[]}),{title:'Editorial gap',transcript:[t[0],{...t[1],text:'We will discuss these results next.'},t[2]],cuts});
+  assert.equal(editorial.cuts.length,0);
+  const invalid={async run(_,input){return {response:input.messages[0].content.startsWith('Review')?{decisions:[]}:{ads:[{start_index:0,end_index:1,confidence:.98}]}};}};
+  const held=await auditOpeningGaps(invalid,{title:'Unverified gap',transcript:t,cuts});assert.equal(held.cuts.length,0);assert.equal(held.unreviewed,1);
 });
 test('missing, duplicate or invalid decisions preserve their candidates without failing the episode',async()=>{
   for(const decisions of [[],[remove,remove],[{...remove,candidate_id:5}],[{...remove,action:'approve'}],null]){
