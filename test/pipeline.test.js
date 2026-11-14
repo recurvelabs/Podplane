@@ -159,3 +159,32 @@ test('cached relative transcripts keep their episode offsets across repeated thr
   }};
   try{await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(transcriptions,2);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');}finally{globalThis.fetch=oldFetch;db.close();}
 });
+
+test('opening audit recovers missed consecutive commercials and preserves the show introduction',async()=>{
+  const {db,data,env}=environment();seed(db);const sample=audio(),bytes=new Uint8Array(sample.length*15),oldFetch=globalThis.fetch;
+  for(let i=0;i<15;i++)bytes.set(sample,i*sample.length);
+  globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
+  let transcriptions=0,audits=0,reviews=0;
+  env.AI={async run(model,input){
+    if(model.includes('whisper')){transcriptions++;return {segments:transcriptions===1?[
+      {start:0,end:20,text:'Sponsored by SafeHouse. Visit safehouse.example for a discount.'},
+      {start:21,end:40,text:'Energy is changing. Listen to Energy Talk at energytalk.example.'},
+      {start:41,end:65,text:'Family meals are special. Grab Fizz soda on your next grocery run.'},
+      {start:70,end:175,text:'Welcome to the show. We discuss the election and the energy industry.'}
+    ]:[{start:0,end:20,text:'Continued editorial discussion.'}]};}
+    const payload=JSON.parse(input.messages[1].content);
+    if(input.messages[0].content.startsWith('Review')){
+      reviews++;const p=payload.proposals[0];assert.deepEqual([p.start_index,p.end_index],[0,2]);
+      const evidence=payload.validation_retry?'Grab Fizz soda on your next grocery run.':'Invented quote that was never spoken';
+      return {response:{decisions:[{candidate_id:0,action:'remove',start_index:0,end_index:2,confidence:.98,evidence,reason:'Three opening commercials'}]}};
+    }
+    if(payload.focus){audits++;assert.match(payload.transcript,/Welcome to the show/);return {response:{ads:[{start_index:0,end_index:2,confidence:.98,sponsor:'Opening sponsors'}]}};}
+    return {response:{ads:[{start_index:0,end_index:0,confidence:.98,sponsor:'SafeHouse'}]}};
+  }};
+  try{
+    const r=await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);
+    assert.equal(audits,1);assert.equal(reviews,2);assert.equal(r.unreviewed,0);assert.equal(r.ads,1);
+    const cuts=JSON.parse(db.prepare('SELECT cuts_json FROM episodes WHERE id=?').get(episodeId).cuts_json);
+    assert.deepEqual([cuts[0].start,cuts[0].end],[0,65]);assert.ok(latestAudio(db,data).length>0);
+  }finally{globalThis.fetch=oldFetch;db.close();}
+});

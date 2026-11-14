@@ -33,7 +33,7 @@ The cloud resources continue running independently of this source handoff. This 
 - Completed audio is cached once and reused across accounts. Accounts receive private combined and per-show RSS feeds. Combined feeds prefix episode titles with short show names; per-show titles, episode GUIDs and audio enclosures are preserved.
 - The owner account has `accounts.unlimited=1` in the existing live database. The source has no email-based privilege shortcut. Existing email/passkey sessions read the entitlement from D1.
 - Unlimited access removes show-count, add/refresh/retry and daily processing allowances, plus the beta episode size/duration caps. Standard users retain the usual limits.
-- The validated suite has 59 passing tests, including WebAuthn signatures, email-code replay/expiry, catalog imports without processing, account isolation, unlimited entitlements, candidate review, cross-window ad breaks, incomplete-review recovery, audio versions, preservation of playback during a refresh and combined-feed title prefixes.
+- The validated suite has 71 passing tests, including WebAuthn signatures, email-code replay/expiry, catalog imports without processing, account isolation, unlimited entitlements, candidate review, cross-window ad breaks, opening-ad and tagline recovery, incomplete-review recovery, transcript caching, audio expiration, preservation of playback during a refresh and combined-feed title prefixes.
 
 ## Processing and costs
 
