@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import { parseFeed, publicURL, safeFetch, boundedText, rss, combinedEpisodeTitle } from './feeds.js';
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
 import { detectCandidates, mergeCandidates, reviewCandidates } from './detection.js';
+import { transcribeAudio } from './transcription.js';
 
 const NOW=()=>Math.floor(Date.now()/1000);
 const ORIGIN='https://podplane-audio.dchalloner.workers.dev';
@@ -165,6 +166,15 @@ export async function publicFeed(req,env,url){
   const body=rss({title:show?`${show.title} · Podplane`:'My podcasts · Podplane',description:show?.description||'Your private podcast feed, with detected advertising removed.',artwork:show?.artwork,link:env.PUBLIC_ORIGIN||SITE,self:url.href,items:items.map(e=>({...e,title:show?e.title:combinedEpisodeTitle(e.podcast_title,e.title),audio_url:`${base}/audio/${e.id}.mp3${e.ready_at?'?v='+e.ready_at:''}`}))});
   return new Response(req.method==='HEAD'?null:body,{headers:{'Content-Type':'application/rss+xml; charset=utf-8','Cache-Control':'private, max-age=120','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'}});
 }
+export async function deleteEpisodeAudio(env,id){
+  await env.AUDIO.delete([`clean/${id}.mp3`,`original/${id}.mp3`]);
+  let cursor;
+  do{
+    const page=await env.AUDIO.list({prefix:`clean/${id}/`,limit:1000,...(cursor?{cursor}:{})});
+    if(page.objects.length)await env.AUDIO.delete(page.objects.map(o=>o.key));
+    cursor=page.truncated?page.cursor:undefined;
+  }while(cursor);
+}
 export async function tick(env){
   const {results}=await env.DB.prepare('SELECT p.* FROM podcasts p WHERE p.last_sync<? AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.podcast_id=p.id) ORDER BY p.last_sync LIMIT 25').bind(NOW()-1700).all();
   for(const p of results)await syncPodcast(env,p);
@@ -173,7 +183,7 @@ export async function tick(env){
   for(const e of stale){try{const instance=await env.PROCESS.get(e.workflow_id);const s=await instance.status();if(['errored','terminated'].includes(s.status))await env.DB.prepare("UPDATE episodes SET status='failed',error='Processing was interrupted. You can retry this episode.' WHERE id=?").bind(e.id).run();}catch{}}
   await startJobs(env);
   const {results:expired}=await env.DB.prepare("SELECT id FROM episodes WHERE created_at<? AND status!='expired' LIMIT 20").bind(NOW()-RETENTION).all();
-  for(const e of expired){await env.AUDIO.delete([`clean/${e.id}.mp3`,`original/${e.id}.mp3`]);await env.DB.prepare("UPDATE episodes SET status='expired' WHERE id=?").bind(e.id).run();}
+  for(const e of expired){await deleteEpisodeAudio(env,e.id);await env.DB.prepare("UPDATE episodes SET status='expired' WHERE id=?").bind(e.id).run();}
   await env.DB.prepare('DELETE FROM limits WHERE expires_at<?').bind(NOW()).run();
   if(env.PUBLIC_ORIGIN){await env.DB.batch([env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(NOW()),env.DB.prepare('DELETE FROM auth_challenges WHERE expires_at<?').bind(NOW()),env.DB.prepare('DELETE FROM email_codes WHERE expires_at<?').bind(NOW()),env.DB.prepare('DELETE FROM directory_results WHERE expires_at<?').bind(NOW())]);}
 }
@@ -188,13 +198,6 @@ const STEP={retries:{limit:2,delay:'15 seconds',backoff:'exponential'},timeout:'
 async function progress(env,id,status,n,preserveReady=false){
   if(preserveReady)await env.DB.prepare('UPDATE episodes SET progress=? WHERE id=?').bind(n,id).run();
   else await env.DB.prepare('UPDATE episodes SET status=?,progress=? WHERE id=?').bind(status,n,id).run();
-}
-function segmentsOf(result,start,end){
-  let segments=(result.segments||[]).map(s=>({start:Number(s.start),end:Number(s.end),text:String(s.text||'')}));
-  if(!segments.length&&result.vtt){const re=/(\d{2}:)?(\d{2}):(\d{2})\.(\d{3}) --> (\d{2}:)?(\d{2}):(\d{2})\.(\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|$)/g;let m;while((m=re.exec(result.vtt))){const secs=(h,m,s,ms)=>(parseInt(h||'0')*3600)+Number(m)*60+Number(s)+Number(ms)/1000;segments.push({start:secs(m[1],m[2],m[3],m[4]),end:secs(m[5],m[6],m[7],m[8]),text:m[9].trim()});}}
-  segments=segments.filter(s=>Number.isFinite(s.start)&&Number.isFinite(s.end)&&s.end>s.start&&s.text.trim()).map(s=>({...s,start:start+s.start,end:Math.min(end,start+s.end)})).filter(s=>s.end>s.start);
-  if(!segments.length&&String(result.text||'').trim())throw new Error('The transcription provider returned no timestamps.');
-  return segments;
 }
 export class EpisodeWorkflow extends WorkflowEntrypoint {
   async run(event,step){
@@ -240,9 +243,9 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         const segments=await step.do(`transcribe-${i}`,STEP,async()=>{
           await progress(env,id,'transcribing',10+Math.round(index/chunks.length*60),preserveReady);
           const object=await env.AUDIO.get(meta.key,{range:{offset:c.byteStart,length:c.byteLength}});
-          const audio=Buffer.from(await object.arrayBuffer()).toString('base64');
-          const result=await env.AI.run('@cf/openai/whisper-large-v3-turbo',{audio,task:'transcribe',vad_filter:false,condition_on_previous_text:false});
-          const segments=segmentsOf(result,c.start,c.end);await env.AUDIO.put(`work/${id}/transcript-${index}.json`,JSON.stringify(segments));return segments;
+          const relative=await transcribeAudio(env,new Uint8Array(await object.arrayBuffer()),c.end-c.start,{force:payload.retranscribe===true});
+          const segments=relative.map(s=>({...s,start:c.start+s.start,end:Math.min(c.end,c.start+s.end)})).filter(s=>s.end>s.start);
+          return segments;
         });transcript.push(...segments);
       }
       const cuts=[],proposals=[];let candidates=0,keptByReview=0,unreviewed=0;

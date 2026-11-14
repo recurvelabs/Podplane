@@ -5,7 +5,7 @@ import {DatabaseSync} from 'node:sqlite';
 import fs from 'node:fs';
 import {frameHeader} from '../processor/media.js';
 registerHooks({resolve(spec,ctx,next){if(spec==='cloudflare:workers')return {url:'data:text/javascript,export class WorkflowEntrypoint {constructor(ctx,env){this.env=env;this.ctx=ctx;}}',shortCircuit:true};return next(spec,ctx);}});
-const {default:service,EpisodeWorkflow}=await import('../processor/index.js');
+const {default:service,EpisodeWorkflow,deleteEpisodeAudio}=await import('../processor/index.js');
 globalThis.FixedLengthStream=class {constructor(length){let count=0;const stream=new TransformStream({transform(chunk,controller){count+=chunk.length;controller.enqueue(chunk);},flush(){assert.equal(count,length);}});this.readable=stream.readable;this.writable=stream.writable;}};
 function environment(){
   const db=new DatabaseSync(':memory:');db.exec(fs.readFileSync(new URL('../processor/schema.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/005-account-unlimited.sql',import.meta.url),'utf8'));
@@ -121,4 +121,41 @@ test('a failed refresh retains the previously published audio',async()=>{
   db.prepare("UPDATE episodes SET status='ready',ready_at=10,audio_bytes=5,cleaned_duration=5 WHERE id=?").run(episodeId);data.set('clean/'+episodeId+'.mp3',new Uint8Array([1,2,3,4,5]));
   globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});env.AI={async run(){throw Error('Provider unavailable');}};
   try{await assert.rejects(()=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,reprocess:true}},step),/Provider unavailable/);const ep=db.prepare('SELECT status,ready_at,audio_bytes,error FROM episodes WHERE id=?').get(episodeId);assert.equal(ep.status,'ready');assert.equal(ep.ready_at,10);assert.equal(ep.audio_bytes,5);assert.match(ep.error,/previous version is still available/);assert.deepEqual([...data.get('clean/'+episodeId+'.mp3')],[1,2,3,4,5]);}finally{globalThis.fetch=oldFetch;db.close();}
+});
+
+test('reprocessing reuses exact-audio transcripts while running fresh advertisement detection',async()=>{
+  const {db,data,env}=environment();seed(db);const bytes=audio(),oldFetch=globalThis.fetch;
+  let transcriptions=0,detections=0;
+  globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
+  env.AI={async run(model){if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:26,text:'Editorial conversation.'}]};}detections++;return {response:{ads:[]}};}};
+  try{
+    await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);
+    const first=db.prepare('SELECT ready_at FROM episodes WHERE id=?').get(episodeId).ready_at;
+    await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,reprocess:true}},step);
+    assert.equal(transcriptions,1);assert.equal(detections,2);assert.deepEqual(latestAudio(db,data),bytes);
+    assert.ok(db.prepare('SELECT ready_at FROM episodes WHERE id=?').get(episodeId).ready_at>first);
+    assert.ok(data.has(`clean/${episodeId}/${first}.mp3`));assert.ok([...data.keys()].some(k=>k.startsWith('transcripts/')));
+    assert.ok(![...data.keys()].some(k=>k.startsWith('work/')));
+  }finally{globalThis.fetch=oldFetch;db.close();}
+});
+
+test('expiration deletes every audio version and handles paginated object listings',async()=>{
+  const deleted=[],prefixes=[];let page=0;
+  await deleteEpisodeAudio({AUDIO:{async delete(keys){deleted.push(...keys);},async list(options){prefixes.push(options);page++;return page===1?{objects:[{key:`clean/${episodeId}/1.mp3`}],truncated:true,cursor:'next'}:{objects:[{key:`clean/${episodeId}/2.mp3`}],truncated:false};}}},episodeId);
+  assert.deepEqual(deleted,[`clean/${episodeId}.mp3`,`original/${episodeId}.mp3`,`clean/${episodeId}/1.mp3`,`clean/${episodeId}/2.mp3`]);
+  assert.equal(prefixes[0].prefix,`clean/${episodeId}/`);assert.equal(prefixes[1].cursor,'next');
+});
+
+test('cached relative transcripts keep their episode offsets across repeated three-minute audio chunks',async()=>{
+  const {db,env}=environment();seed(db);const sample=audio(),bytes=new Uint8Array(sample.length*15),oldFetch=globalThis.fetch;
+  for(let i=0;i<15;i++)bytes.set(sample,i*sample.length);
+  let transcriptions=0;
+  globalThis.fetch=async()=>new Response(bytes,{headers:{'Content-Type':'audio/mpeg','Content-Length':String(bytes.length)}});
+  env.AI={async run(model,input){
+    if(model.includes('whisper')){transcriptions++;return {segments:[{start:0,end:5,text:'Editorial conversation.'}]};}
+    const transcript=JSON.parse(input.messages[1].content).transcript;
+    assert.match(transcript,/\[0\] 0\.00-5\.00/);assert.match(transcript,/\[1\] 180\.\d+-185\.\d+/);assert.match(transcript,/\[2\] 360\.\d+-365\.\d+/);
+    return {response:{ads:[]}};
+  }};
+  try{await new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId}},step);assert.equal(transcriptions,2);assert.equal(db.prepare('SELECT status FROM episodes WHERE id=?').get(episodeId).status,'ready');}finally{globalThis.fetch=oldFetch;db.close();}
 });
