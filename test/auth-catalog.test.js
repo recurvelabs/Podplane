@@ -105,6 +105,73 @@ test('adding an unprocessed chart show queues only its latest episode and starts
   }finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('following a cached catalog show reuses the episode without publisher fetch or another job',async()=>{const {db,env}=setup(),p='a'.repeat(32),e='e'.repeat(40);db.prepare('INSERT INTO podcasts(id,feed_url,title,public_catalog) VALUES(?,?,?,1)').run(p,'https://example.com/rss','Cached show');db.prepare('INSERT INTO episodes(id,podcast_id,guid,title,source_url,published_at,created_at,status) VALUES(?,?,?,?,?,?,?,?)').run(e,p,'g','Cached episode','https://example.com/a.mp3',now(),now(),'ready');const oldFetch=globalThis.fetch;globalThis.fetch=()=>{throw Error('Cached follow must not fetch publisher');};try{const r=await internal(new Request(origin+'/internal/podcasts',{method:'POST',headers:{Authorization:'Bearer internal-test','X-Podplane-Subject':'email:alice@example.com','Content-Type':'application/json'},body:JSON.stringify({podcast_id:p})}),env,new URL(origin+'/internal/podcasts'));assert.equal(r.status,201);const d=await r.json();assert.equal(d.episodes[0].id,e);assert.equal(d.episodes[0].status,'ready');assert.ok(d.feed_url.startsWith(origin));}finally{globalThis.fetch=oldFetch;db.close();}});
+test('removing a show updates only the signed-in feed, revokes its access and allows cached re-adding',async()=>{
+  const {db,env,id,session}=setup(),cookie='__Host-podplane='+session;
+  const podcastId='a'.repeat(32),episodeId='e'.repeat(40),keptPodcast='b'.repeat(32),keptEpisode='f'.repeat(40),version=now();
+  const bobId=crypto.randomUUID(),bobSession=randomBytes(32).toString('base64url'),bobCookie='__Host-podplane='+bobSession;
+  db.prepare('INSERT INTO accounts(id,subject,email,created_at) VALUES(?,?,?,?)').run(bobId,'email:bob@example.com','bob@example.com',now());
+  db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(sha(bobSession).toString('hex'),bobId,now(),now()+3600,'email');
+  for(const [p,e,title] of [[podcastId,episodeId,'Shared show'],[keptPodcast,keptEpisode,'Kept show']]){
+    db.prepare('INSERT INTO podcasts(id,feed_url,title,public_catalog) VALUES(?,?,?,1)').run(p,'https://example.com/'+p,title);
+    db.prepare('INSERT INTO episodes(id,podcast_id,guid,title,source_url,published_at,created_at,status,audio_bytes,ready_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(e,p,e,title+' episode','https://example.com/'+e+'.mp3',now(),now(),'ready',5,version);
+    db.prepare('INSERT INTO subscriptions VALUES(?,?,?)').run(id,p,now());
+  }
+  db.prepare('INSERT INTO subscriptions VALUES(?,?,?)').run(bobId,podcastId,now());
+  const audioKey='clean/'+episodeId+'/'+version+'.mp3',audio=new Map([[audioKey,new Uint8Array([1,2,3,4,5])]]);
+  let audioDeletes=0,started=0,publisherFetches=0;
+  env.AUDIO={async head(key){const bytes=audio.get(key);return bytes?{size:bytes.length}:null;},async get(key){const bytes=audio.get(key);return bytes?{body:bytes.slice()}:null;},async delete(keys){audioDeletes++;for(const key of Array.isArray(keys)?keys:[keys])audio.delete(key);}};
+  env.PROCESS={async create(){started++;throw Error('Cached re-adding must not start processing');}};
+  const oldFetch=globalThis.fetch;
+  globalThis.fetch=()=>{publisherFetches++;throw Error('Removing or re-adding cached shows must not fetch a publisher');};
+  const dashboard=async accountCookie=>{const r=await staging.fetch(req('/api/dashboard',{cookie:accountCookie}),env);assert.equal(r.status,200);return r.json();};
+  const catalogShow=async accountCookie=>{const r=await staging.fetch(req('/api/catalog',{cookie:accountCookie}),env);assert.equal(r.status,200);return (await r.json()).podcasts.find(p=>p.id===podcastId);};
+  try{
+    const before=await dashboard(cookie),bobBefore=await dashboard(bobCookie),sharedEpisode={...db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId)};
+    const showFeed=before.shows.find(p=>p.id===podcastId).feed_url,audioURL=before.episodes.find(e=>e.id===episodeId).audio_url;
+    assert.equal((await catalogShow(cookie)).subscribed,1);
+    assert.equal((await staging.fetch(new Request(showFeed),env)).status,200);
+    assert.equal((await staging.fetch(new Request(audioURL),env)).status,200);
+    const path='/api/podcasts/'+podcastId;
+    assert.equal((await staging.fetch(req(path,{method:'DELETE'}),env)).status,401);
+    assert.equal((await staging.fetch(req(path,{method:'DELETE',cookie,headers:{Origin:'https://evil.example'}}),env)).status,403);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM subscriptions').get().n,3);
+    const removed=await staging.fetch(req(path,{method:'DELETE',cookie,headers:{'X-Podplane-Subject':'email:bob@example.com'}}),env);
+    assert.equal(removed.status,200);
+    const after=await removed.json();
+    assert.equal(after.feed_url,before.feed_url);
+    assert.deepEqual(after.shows.map(p=>p.id),[keptPodcast]);
+    assert.deepEqual(after.episodes.map(e=>e.id),[keptEpisode]);
+    const feed=await staging.fetch(new Request(before.feed_url),env);
+    assert.equal(feed.status,200);
+    const xml=await feed.text();assert.ok(xml.includes(keptEpisode));assert.ok(!xml.includes(episodeId));
+    assert.equal((await staging.fetch(new Request(showFeed),env)).status,404);
+    assert.equal((await staging.fetch(new Request(audioURL),env)).status,404);
+    assert.equal((await catalogShow(cookie)).subscribed,0);
+    assert.equal((await catalogShow(bobCookie)).subscribed,1);
+    const bobAfter=await dashboard(bobCookie);
+    assert.deepEqual(bobAfter,bobBefore);
+    assert.ok((await (await staging.fetch(new Request(bobBefore.feed_url),env)).text()).includes(episodeId));
+    assert.equal((await staging.fetch(new Request(bobBefore.shows[0].feed_url),env)).status,200);
+    const bobAudio=await staging.fetch(new Request(bobBefore.episodes[0].audio_url),env);
+    assert.equal(bobAudio.status,200);assert.deepEqual([...new Uint8Array(await bobAudio.arrayBuffer())],[1,2,3,4,5]);
+    assert.deepEqual({...db.prepare('SELECT * FROM episodes WHERE id=?').get(episodeId)},sharedEpisode);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM podcasts').get().n,2);
+    assert.equal(audioDeletes,0);assert.ok(audio.has(audioKey));
+    const repeated=await staging.fetch(req(path,{method:'DELETE',cookie}),env);
+    assert.equal(repeated.status,200);assert.deepEqual(await repeated.json(),after);
+    const added=await staging.fetch(req('/api/podcasts',{method:'POST',cookie,body:{podcast_id:podcastId}}),env);
+    assert.equal(added.status,201);
+    const restored=await added.json();
+    assert.equal(restored.feed_url,before.feed_url);
+    assert.deepEqual(restored.shows.map(p=>p.id).sort(),[podcastId,keptPodcast].sort());
+    assert.equal(restored.episodes.find(e=>e.id===episodeId).audio_url,audioURL);
+    assert.equal((await catalogShow(cookie)).subscribed,1);
+    assert.equal((await staging.fetch(new Request(showFeed),env)).status,200);
+    assert.equal((await staging.fetch(new Request(audioURL),env)).status,200);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM episodes').get().n,2);
+    assert.equal(started,0);assert.equal(publisherFetches,0);assert.equal(audioDeletes,0);
+  }finally{globalThis.fetch=oldFetch;db.close();}
+});
 test('unlimited accounts can add past five shows and the daily add allowance; beta accounts cannot self-upgrade',async()=>{
   for(const unlimited of [0,1]){
     const {db,env,id}=setup();db.prepare('UPDATE accounts SET unlimited=? WHERE id=?').run(unlimited,id);

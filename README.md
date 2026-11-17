@@ -27,6 +27,10 @@ The catalog includes the current imported Apple Podcasts US top 200, with chart 
 
 Unlimited access is a stored account entitlement (`accounts.unlimited=1`) granted by an operator. It removes the show cap, daily processing allowance, add/refresh/retry allowances, and beta episode duration/size caps for that account. Processing checks actual subscriptions and stored account flags; request bodies and identity headers cannot grant access. Shared episodes requested by an unlimited subscriber do not consume the beta processing allowance. Authentication, request protection, retention, format support and platform limits still apply.
 
+## Managing your feed
+
+Use **Remove from feed** beside a show in **My podcasts**, or on its card in the shared catalog. Confirm the named show to remove its subscription and episodes from your Podplane feeds. Your combined feed link stays the same; your podcast app picks up the change when it refreshes. Downloads already stored in the player remain under the player’s control. You can add the show again, reusing available cached episodes. Removal affects only your account.
+
 ## Audio pipeline
 
 Combined RSS feeds prefix episode titles with a short show name, such as `Daily: ...`, `JRE: ...` or `PSA: ...`. Per-show feeds retain the publisher's episode titles. Feed URLs, episode GUIDs and audio enclosures stay the same.

@@ -87,3 +87,11 @@ Mixed ad/editorial boundary segments receive a separate Kimi check. Flagged segm
 The current boundary checker groups word-timed fragments from their original transcript segment so a multiword editorial return is assessed as a coherent phrase. Candidate reviewers also receive continuous spoken text beside the numbered segments. This protects transitions that were previously obscured by one-word-per-line formatting.
 
 Dedicated publisher newsletter and app promotional breaks are advertisements even when free. For boundary repair, the model classifies the complete original mixed phrase, including words already outside a proposed cut. The application maps its exact editorial quote to observed word timestamps, preserves any overlap, independently reviews the narrower cut, and audits the full retained transcript again. Three unresolved boundary rounds hold publication.
+
+## November 17 feed removal controls
+
+Worker version `ce2ab90b-ae00-471b-9872-bec6f0c3522a` was deployed on November 17, 2026 at 7:47 a.m. Pacific and serves all traffic. **Remove from feed** is visible beside each show in My podcasts and on subscribed cards in the shared catalog. The confirmation names the show. Pending and failed requests have clear states, and successful changes update the dashboard and catalog together. Mobile show actions wrap onto a separate row.
+
+The existing account-scoped subscription API remains responsible for removal. The new integration regression verifies authentication and origin checks, account isolation, combined RSS updates, per-show and audio access revocation, repeat removal, and cached re-adding without publisher downloads or processing jobs. Shared cached episodes and the combined feed URL remain intact.
+
+All 85 tests, both builds, and artifact validation passed. Isolated browser checks at a 390-pixel viewport verified dashboard and catalog removal, cancellation, failure recovery, re-adding, synchronized state, and no horizontal overflow or script errors. Live checks confirmed the new controls in the served catalog code, healthy service output, and a 401 response for anonymous account API access. The content-only deployment preserved bindings, signing secrets, compatibility settings, and observability configuration.
