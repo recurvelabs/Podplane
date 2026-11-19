@@ -1,7 +1,7 @@
 // Detection and review use separate calls and models. Reported confidence
 // remains an instruction-following signal, not a measured probability.
 export const AD_MODEL='@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-export const REVIEW_MODEL='@cf/moonshotai/kimi-k2.7-code';
+export const REVIEW_MODEL='@cf/zai-org/glm-5.3';
 const MIN_CONFIDENCE=0.9;
 export const REVIEW_BATCH_SIZE=8;
 const confidenceOK=n=>typeof n==='number'&&Number.isFinite(n)&&n>=MIN_CONFIDENCE&&n<=1;
@@ -59,7 +59,7 @@ function objectResponse(result,stage){
 async function infer(ai,system,user,stage,schema,model=AD_MODEL){
   return objectResponse(await ai.run(model,{
     messages:[{role:'system',content:system},{role:'user',content:JSON.stringify(user)}],
-    max_tokens:model===REVIEW_MODEL?8192:1800,...(model===REVIEW_MODEL?{chat_template_kwargs:{thinking:stage==='boundary checker'}}:{}),temperature:0,response_format:schema?{type:'json_schema',json_schema:schema}:{type:'json_object'}
+    max_tokens:model===REVIEW_MODEL?8192:1800,...(model===REVIEW_MODEL?{reasoning_effort:'low'}:{}),temperature:0,response_format:schema?{type:'json_schema',json_schema:schema}:{type:'json_object'}
   }),stage);
 }
 
