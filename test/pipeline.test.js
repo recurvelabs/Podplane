@@ -8,7 +8,7 @@ registerHooks({resolve(spec,ctx,next){if(spec==='cloudflare:workers')return {url
 const {default:service,EpisodeWorkflow,deleteEpisodeAudio}=await import('../processor/index.js');
 globalThis.FixedLengthStream=class {constructor(length){let count=0;const stream=new TransformStream({transform(chunk,controller){count+=chunk.length;controller.enqueue(chunk);},flush(){assert.equal(count,length);}});this.readable=stream.readable;this.writable=stream.writable;}};
 function environment(){
-  const db=new DatabaseSync(':memory:');db.exec(fs.readFileSync(new URL('../processor/schema.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/005-account-unlimited.sql',import.meta.url),'utf8'));
+  const db=new DatabaseSync(':memory:');db.exec(fs.readFileSync(new URL('../processor/schema.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/005-account-unlimited.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/006-missed-ads.sql',import.meta.url),'utf8'));
   function prepare(sql,values=[]){return {bind(...v){return prepare(sql,v);},async first(){return db.prepare(sql).get(...values)||null;},async all(){return {results:db.prepare(sql).all(...values)};},async run(){const r=db.prepare(sql).run(...values);return {meta:{changes:Number(r.changes)}};}};}
   const data=new Map();const AUDIO={async head(key){const b=data.get(key);return b?{size:b.length}:null;},async get(key,options){let b=data.get(key);if(!b)return null;if(options?.range){const {offset,length}=options.range;if(length<=0||offset>=b.length)throw Error('get: range not satisfiable');b=b.slice(offset,offset+length);}return {body:new Response(b).body,arrayBuffer:async()=>b.slice().buffer,json:async()=>JSON.parse(new TextDecoder().decode(b))};},async put(key,value){const b=typeof value==='string'?new TextEncoder().encode(value):new Uint8Array(await new Response(value).arrayBuffer());data.set(key,b);},async delete(keys){for(const key of Array.isArray(keys)?keys:[keys])data.delete(key);},async list({prefix}){return {objects:[...data.keys()].filter(k=>k.startsWith(prefix)).map(key=>({key}))};}};
   return {db,data,env:{DB:{prepare,async batch(statements){return Promise.all(statements.map(x=>x.run()));}},AUDIO,INTERNAL_SECRET:'internal-test-secret',FEED_SECRET:'feed-test-secret'}};
@@ -211,4 +211,71 @@ test('production pipeline transcribes skipped speech and lets detection and revi
     assert.ok(ep.duration-ep.cleaned_duration>7.9);assert.ok(ep.duration-ep.cleaned_duration<=8);
     assert.equal(audit.coverage.converged,true);
   }finally{globalThis.fetch=oldFetch;db.close();}
+});
+
+function reportedAudio({oldCuts=[],timestamp=null}={}){
+  const {db,data,env}=environment();seed(db);
+  const bytes=audio(),key=`clean/${episodeId}/10.mp3`,duration=bytes.length/417*1152/44100;
+  data.set(key,bytes);
+  const head=env.AUDIO.head;
+  env.AUDIO.head=async key=>{const object=await head(key);return object?{...object,etag:'test-etag'}:null;};
+  db.prepare("UPDATE episodes SET status='ready',duration=?,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=10 WHERE id=?")
+    .run(duration+oldCuts.reduce((n,c)=>n+c.end-c.start,0),duration,bytes.length,JSON.stringify(oldCuts),episodeId);
+  db.prepare("INSERT INTO accounts(id,subject,created_at) VALUES('listener','listener',0)").run();
+  db.prepare("INSERT INTO subscriptions VALUES('listener',?,0)").run(podcastId);
+  db.prepare("INSERT INTO missed_ad_reports(episode_id,version,source_key,source_etag,position_seconds,status,created_at) VALUES(?,10,?,'test-etag',?,'running',0)").run(episodeId,key,timestamp);
+  const run=(attempt=1)=>new EpisodeWorkflow({},env).run({payload:{episode_id:episodeId,report_version:10,report_attempt:attempt}},step);
+  return {db,data,env,bytes,run,key};
+}
+test('flagged audio is reviewed from the exact published bytes, explained against the old audit, and atomically replaced',async()=>{
+  const {db,data,env,bytes,key,run}=reportedAudio({oldCuts:[{start:0,end:1,sponsor:'Original ad'}],timestamp:4});
+  const quote='This podcast is sponsored by Example Company.';
+  const transcript=[{start:0,end:5,text:quote},{start:5,end:26,text:'Today we discuss ocean currents.'}];
+  data.set(`clean/${episodeId}/10.audit.json`,new TextEncoder().encode(JSON.stringify({transcript,kept_candidates:[{start:0,end:5}]})));
+  let positionPass=false;
+  env.AI={async run(model,input){
+    if(model.includes('whisper'))return {segments:transcript};
+    const system=input.messages[0].content;
+    if(system.startsWith('Assess ONLY'))return {response:{assessments:[{segment_id:0,contains_editorial:false,editorial_quote:''}]}};
+    if(system.startsWith('Review'))return {response:{decisions:[{candidate_id:0,action:'remove',start_index:0,end_index:0,confidence:0.98,evidence_segment_id:0}]}};
+    if(system.startsWith('Audit')&&!JSON.parse(input.messages[1].content).verified_cuts.length)positionPass=true;
+    return {response:{ads:[{start_index:0,end_index:0,confidence:0.99,sponsor:'Example Company'}]}};
+  }};
+  const before=db.prepare('SELECT duration FROM episodes').get().duration;
+  await run();assert.ok(positionPass);assert.deepEqual(data.get(key),bytes);
+  const ep=db.prepare('SELECT * FROM episodes').get(),report=db.prepare('SELECT * FROM missed_ad_reports').get();
+  assert.equal(ep.duration,before);assert.ok(ep.audio_bytes<bytes.length);assert.equal(report.status,'fixed');assert.equal(report.result_version,ep.ready_at);
+  assert.match(report.detail,/earlier reviewer kept/);assert.equal(JSON.parse(ep.cuts_json)[1].input_version,10);
+  const audit=JSON.parse(new TextDecoder().decode(data.get(`clean/${episodeId}/${ep.ready_at}.audit.json`)));
+  assert.equal(audit.input_version,10);assert.equal(audit.cuts[0].evidence,quote);assert.ok(audit.coverage.converged);
+  assert.equal((await run()).skipped,true);db.close();
+});
+test('unconfirmed reports preserve the publication and keep audit evidence',async()=>{
+  const {db,data,env,bytes,key,run}=reportedAudio();
+  env.AI={async run(model){return model.includes('whisper')?{segments:[{start:0,end:26,text:'Audio about ocean currents.'}]}:{response:{ads:[]}};}};
+  await run();
+  assert.equal(db.prepare('SELECT status FROM missed_ad_reports').get().status,'unconfirmed');
+  assert.equal(db.prepare('SELECT ready_at FROM episodes').get().ready_at,10);
+  assert.deepEqual(data.get(key),bytes);assert.ok(data.has(`clean/${episodeId}/report-10.audit.json`));db.close();
+});
+test('report failures retry once, preserve playback and never substitute changed publisher audio',async()=>{
+  const {db,env,run}=reportedAudio();
+  env.AUDIO.head=async()=>({size:9,etag:'different-input'});
+  await assert.rejects(run(),/exact reported audio/);
+  assert.equal(db.prepare('SELECT status FROM missed_ad_reports').get().status,'queued');
+  assert.equal((await run()).skipped,true);
+  await assert.rejects(run(2),/exact reported audio/);
+  assert.equal(db.prepare('SELECT status FROM missed_ad_reports').get().status,'failed');
+  assert.equal(db.prepare('SELECT ready_at FROM episodes').get().ready_at,10);db.close();
+});
+
+test('a newer publication arriving during review cannot be overwritten by the report job',async()=>{
+  const {db,env,run}=reportedAudio();
+  env.AI={async run(model){
+    db.prepare('UPDATE episodes SET ready_at=11 WHERE id=?').run(episodeId);
+    return model.includes('whisper')?{segments:[{start:0,end:26,text:'Ocean currents.'}]}:{response:{ads:[]}};
+  }};
+  await run();
+  assert.equal(db.prepare('SELECT ready_at FROM episodes').get().ready_at,11);
+  assert.equal(db.prepare('SELECT status FROM missed_ad_reports').get().status,'closed');db.close();
 });

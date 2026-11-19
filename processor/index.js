@@ -1,4 +1,5 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
+import {reportMissedAd,serviceReports,activeReport,finishReport,retryReport,reportInstance,diagnoseCuts} from './reports.js';
 import { Buffer } from 'node:buffer';
 import { parseFeed, publicURL, safeFetch, boundedText, rss, combinedEpisodeTitle } from './feeds.js';
 import { scanFrames, normalizeCuts, keepRanges, parseRange } from './media.js';
@@ -47,8 +48,12 @@ async function dashboard(env,a){
   const {results:shows}=await env.DB.prepare(`SELECT p.id,p.title,p.author,p.artwork,p.last_sync,p.last_error,s.created_at,
     (SELECT count(*) FROM episodes e WHERE e.podcast_id=p.id AND e.status='ready') AS ready_count
     FROM subscriptions s JOIN podcasts p ON p.id=s.podcast_id WHERE s.account_id=? ORDER BY s.created_at DESC`).bind(a.id).all();
-  const {results:episodes}=await env.DB.prepare(`SELECT e.id,e.podcast_id,e.title,e.published_at,e.duration,e.cleaned_duration,e.audio_bytes,e.status,e.progress,e.cuts_json,e.error,e.ready_at,p.title AS podcast_title,p.artwork
-    FROM episodes e JOIN podcasts p ON p.id=e.podcast_id JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=? AND e.created_at>? ORDER BY e.published_at DESC LIMIT 60`).bind(a.id,NOW()-RETENTION).all();
+  const {results:episodes}=await env.DB.prepare(`SELECT e.id,e.podcast_id,e.title,e.published_at,e.duration,e.cleaned_duration,e.audio_bytes,e.status,e.progress,e.cuts_json,e.error,e.ready_at,p.title AS podcast_title,p.artwork,
+    r.status AS report_status,r.detail AS report_detail,r.position_seconds AS report_position
+    FROM episodes e JOIN podcasts p ON p.id=e.podcast_id JOIN subscriptions s ON s.podcast_id=p.id
+    LEFT JOIN missed_ad_reports r ON r.episode_id=e.id AND r.version=(SELECT version FROM missed_ad_reports m
+      WHERE m.episode_id=e.id AND (m.version=coalesce(e.ready_at,0) OR m.result_version=e.ready_at) ORDER BY version DESC LIMIT 1)
+    WHERE s.account_id=? AND e.created_at>? ORDER BY e.published_at DESC LIMIT 60`).bind(a.id,NOW()-RETENTION).all();
   return {feed_url:`${base}/rss`,plan:a.unlimited?'unlimited':'beta',max_shows:a.unlimited?null:5,daily_audio_minutes:a.unlimited?null:600,retention_days:30,shows:shows.map(s=>({...s,feed_url:`${base}/${s.id}/rss`})),episodes:episodes.map(e=>({...e,cuts:JSON.parse(e.cuts_json),cuts_json:undefined,audio_url:e.status==='ready'?`${base}/audio/${e.id}.mp3${e.ready_at?'?v='+e.ready_at:''}`:null}))};
 }
 async function insertEpisodes(env,podcastId,items){
@@ -133,6 +138,12 @@ export async function internal(req,env,url){
     const {results}=await env.DB.prepare('SELECT p.* FROM podcasts p JOIN subscriptions s ON s.podcast_id=p.id WHERE s.account_id=?').bind(a.id).all();
     for(const p of results)await syncPodcast(env,p);await startJobs(env);return json(await dashboard(env,a));
   }
+  const report=/^\/internal\/episodes\/([a-f0-9]{40})\/missed-ad$/.exec(url.pathname);
+  if(report&&req.method==='POST'){
+    let body;try{body=await req.json();}catch{throw err('Invalid report.');}
+    await reportMissedAd(env,a,report[1],body);
+    return json(await dashboard(env,a),202);
+  }
   const retry=/^\/internal\/episodes\/([a-f0-9]{40})\/retry$/.exec(url.pathname);
   if(retry&&req.method==='POST'){
     const e=await env.DB.prepare('SELECT e.* FROM episodes e JOIN subscriptions s ON s.podcast_id=e.podcast_id WHERE s.account_id=? AND e.id=?').bind(a.id,retry[1]).first();
@@ -184,6 +195,7 @@ export async function tick(env){
   const {results:stale}=await env.DB.prepare("SELECT id,workflow_id FROM episodes WHERE status IN ('processing','transcribing','detecting','editing') AND created_at<? LIMIT 15").bind(NOW()-3600).all();
   for(const e of stale){try{const instance=await env.PROCESS.get(e.workflow_id);const s=await instance.status();if(['errored','terminated'].includes(s.status))await env.DB.prepare("UPDATE episodes SET status='failed',error='Processing was interrupted. You can retry this episode.' WHERE id=?").bind(e.id).run();}catch{}}
   await startJobs(env);
+  await serviceReports(env);
   const {results:expired}=await env.DB.prepare("SELECT id FROM episodes WHERE created_at<? AND status!='expired' LIMIT 20").bind(NOW()-RETENTION).all();
   for(const e of expired){await deleteEpisodeAudio(env,e.id);await env.DB.prepare("UPDATE episodes SET status='expired' WHERE id=?").bind(e.id).run();}
   await env.DB.prepare('DELETE FROM limits WHERE expires_at<?').bind(NOW()).run();
@@ -209,11 +221,21 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
     if(typeof payload==='string'){try{payload=JSON.parse(payload);}catch{throw new Error('Workflow payload must be valid JSON');}}
     const env=this.env,id=payload?.episode_id;
     if(typeof id!=='string'||!/^[a-f0-9]{40}$/.test(id))throw new Error('Workflow requires a valid episode_id');
-    const preserveReady=payload.reprocess===true;
+    const report=payload.report_version!==undefined,version=payload.report_version,attempt=payload.report_attempt;
+    if(report&&(!Number.isSafeInteger(version)||version<0||!Number.isSafeInteger(attempt)||attempt<1))throw new Error('Invalid report version or attempt');
+    const preserveReady=report||payload.reprocess===true;
+    const workPrefix=report?`work/${reportInstance(id,version,attempt)}/`:`work/${id}/`;
     try{
+      const ticket=report?await step.do('reported-publication',STEP,()=>activeReport(env,id,version,attempt)):null;
+      if(report&&!ticket)return {episode_id:id,skipped:true};
       const unlimited=await episodeIsUnlimited(env,id);
       const meta=await step.do('download',STEP,async()=>{
         const ep=await env.DB.prepare('SELECT * FROM episodes WHERE id=?').bind(id).first();if(!ep)throw new Error('Episode missing');
+        if(report){
+          const key=ticket.source_key,file=await env.AUDIO.head(key);
+          if(!file||file.etag!==ticket.source_etag)throw new Error('The exact reported audio is no longer available.');
+          return {size:file.size,key,title:ep.title};
+        }
         await progress(env,id,'processing',3,preserveReady);
         let key=`original/${id}.mp3`,cached=await env.AUDIO.head(key);if(cached)return {size:cached.size,key,title:ep.title};
         if(preserveReady){const replay=`original/replay/${id}.mp3`,saved=await env.AUDIO.head(replay);if(saved)return {size:saved.size,key:replay,title:ep.title};}
@@ -229,7 +251,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         const chunk=await step.do(`index-${i}`,STEP,async()=>{
           const object=await env.AUDIO.get(meta.key,{range:{offset:previous.offset,length:Math.min(8*1024*1024,meta.size-previous.offset)}});
           const bytes=new Uint8Array(await object.arrayBuffer());const scanned=scanFrames(bytes,previous.offset,previous.time);
-          const key=`work/${id}/index-${index}.json`;await env.AUDIO.put(key,JSON.stringify(scanned));
+          const key=workPrefix+`index-${index}.json`;await env.AUDIO.put(key,JSON.stringify(scanned));
           return {key,offset:scanned.offset,start:scanned.start,end:scanned.end,byteStart:scanned.byteStart,byteLength:scanned.byteLength};
         });chunks.push(chunk);offset=chunk.offset;time=chunk.end;if(!unlimited&&time>10800)throw new Error('This beta supports episodes up to three hours.');
         // ID3v1/APEv2 trailers are not audio and must not start a new chunk.
@@ -238,15 +260,15 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       }
       await step.do('reserve-budget',STEP,async()=>{
         await reserveProcessingBudget(env,id,time);
-        await env.DB.prepare('UPDATE episodes SET duration=? WHERE id=?').bind(time,id).run();
+        if(!report)await env.DB.prepare('UPDATE episodes SET duration=? WHERE id=?').bind(time,id).run();
       });
       let transcript=[];
       for(let i=0;i<chunks.length;i++){
         const c=chunks[i],index=i;
         const segments=await step.do(`transcribe-${i}`,STEP,async()=>{
-          await progress(env,id,'transcribing',10+Math.round(index/chunks.length*60),preserveReady);
+          if(!report)await progress(env,id,'transcribing',10+Math.round(index/chunks.length*60),preserveReady);
           const object=await env.AUDIO.get(meta.key,{range:{offset:c.byteStart,length:c.byteLength}});
-          const relative=await transcribeAudio(env,new Uint8Array(await object.arrayBuffer()),c.end-c.start,{force:payload.retranscribe===true});
+          const relative=await transcribeAudio(env,new Uint8Array(await object.arrayBuffer()),c.end-c.start,{force:report||payload.retranscribe===true});
           const segments=relative.map(s=>({...s,start:c.start+s.start,end:Math.min(c.end,c.start+s.end)})).filter(s=>s.end>s.start);
           return segments;
         });transcript.push(...segments);
@@ -271,12 +293,13 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         transcript.push(...recovered);recoveredSegments+=recovered.length;
       }
       transcript.sort((a,b)=>a.start-b.start||a.end-b.end);
-      const cuts=[],proposals=[],pending=[];let candidates=0,keptByReview=0,unreviewed=0;
+      if(report&&!transcript.length)throw new Error('No timestamped speech was available to verify the listener report.');
+      const cuts=[],proposals=[],pending=[],keptCandidates=[];let candidates=0,keptByReview=0,unreviewed=0;
       // 150 transcript segments per pass, with overlapping context. IDs make boundaries deterministic.
       for(let i=0;i<transcript.length;i+=150){
         const coreStart=i,coreEnd=Math.min(i+150,transcript.length),lo=Math.max(0,i-20),hi=Math.min(transcript.length,coreEnd+20);
         const detected=await step.do(`detect-v11-${i}`,STEP,async()=>{
-          await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
+          if(!report)await progress(env,id,'detecting',72+Math.round(coreStart/Math.max(1,transcript.length)*10),preserveReady);
           return detectCandidates(env.AI,{title:meta.title,transcript,lo,hi,coreStart,coreEnd});
         });proposals.push(...detected);
       }
@@ -290,6 +313,22 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
           title:meta.title,transcript,lo:0,hi,coreStart:0,coreEnd,focus:'opening'
         })));
       }
+      if(report&&ticket.position_seconds!==null){
+        const t=ticket.position_seconds,first=transcript.findIndex(s=>s.end>=t-45);
+        if(first>=0){
+          const after=transcript.findIndex((s,i)=>i>=first&&s.start>t+45);
+          const end=after<0?transcript.length:after;
+          if(first<end){
+            for(let i=first;i<end;i+=80){
+              const coreEnd=Math.min(end,i+80);
+              proposals.push(...await step.do(`reported-position-${i}`,STEP,()=>detectCandidates(env.AI,{
+                title:meta.title,transcript,lo:Math.max(0,i-12),hi:Math.min(transcript.length,coreEnd+12),
+                coreStart:i,coreEnd,focus:'residual'
+              })));
+            }
+          }
+        }
+      }
       const merged=mergeCandidates(transcript,proposals);candidates=merged.length;
       for(let i=0;i<merged.length;i++){
         const batch=[merged[i]],lo=Math.max(0,merged[i].start_index-12),hi=Math.min(transcript.length,merged[i].end_index+13);
@@ -298,6 +337,7 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
         if(reviewed.unreviewed)reviewed=await step.do(`review-v11-retry-${i}`,STEP,()=>review(true));
         cuts.push(...reviewed.cuts);keptByReview+=reviewed.kept;unreviewed+=reviewed.unreviewed||0;
         if(reviewed.unreviewed)pending.push(...batch);
+        else if(!reviewed.cuts.length)keptCandidates.push({start:batch[0].start,end:batch[0].end});
       }
       const coverage=await auditTranscript(env.AI,{title:meta.title,transcript,cuts,pending,
         runStep:(name,fn)=>step.do(name,STEP,fn)});
@@ -321,26 +361,63 @@ export class EpisodeWorkflow extends WorkflowEntrypoint {
       if(removed>time*0.4)throw new Error('More than 40% was marked as ads. This episode was held to protect the conversation.');
       const reviewNotice=unreviewed?'Some possible ads were left in this episode because their review was incomplete.':null;
       if(unreviewed)console.log(JSON.stringify({event:'ad_review_incomplete',episode:id,candidates,unreviewed}));
+      const audit={version:AUDIT_VERSION,episode_id:id,workflow_id:event.instanceId||null,
+        source_bytes:meta.size,source_duration:time,transcript,cuts:normalized,kept_candidates:keptCandidates,
+        transcription_gaps:{checked:gaps.length,recovered_segments:recoveredSegments},
+        boundary_refinement:{refined_segments:boundaries.refined_segments,boundary_repairs:boundaries.boundary_repairs||0,coverage:boundaries.coverage},
+        coverage:{passes:coverage.passes,converged:coverage.converged,unreviewed},
+        ...(report?{input_version:version,reported_position:ticket.position_seconds}:{})};
       await step.do('edit-and-publish',{...STEP,timeout:'10 minutes'},async()=>{
-        await progress(env,id,'editing',94,preserveReady);const ranges=[];let duration=0;
+        if(report){
+          if(!await activeReport(env,id,version,attempt)){
+            await finishReport(env,id,version,attempt,'closed','The reported version is no longer current or subscribed.');
+            return;
+          }
+          if(!normalized.length){
+            await env.AUDIO.put(`clean/${id}/report-${version}.audit.json`,JSON.stringify(audit),{httpMetadata:{contentType:'application/json'}});
+            await finishReport(env,id,version,attempt,'unconfirmed','The review could not verify another ad in this audio.');
+            return;
+          }
+        }else await progress(env,id,'editing',94,preserveReady);
+        const ranges=[];let duration=0;
         for(const c of chunks){const index=await (await env.AUDIO.get(c.key)).json();const kept=keepRanges(index.frames,normalized);duration+=kept.duration;for(const r of kept.ranges){const last=ranges.at(-1);if(last&&last.offset+last.length===r.offset)last.length+=r.length;else ranges.push({...r});}}
         const size=ranges.reduce((n,r)=>n+r.length,0);if(!size)throw new Error('No playable audio remains');
+        const ep=await env.DB.prepare('SELECT duration,cuts_json FROM episodes WHERE id=?').bind(id).first();
+        if(report&&ep.duration>0&&duration<ep.duration*0.6)throw new Error('Cumulative cuts exceed the episode removal limit.');
+        if(report&&size>=meta.size)throw new Error('The verified cut contains no removable audio frames.');
+        const elsewhere=report&&ticket.position_seconds!==null&&!normalized.some(c=>c.start<=ticket.position_seconds+45&&c.end>=ticket.position_seconds-45);
+        const detail=report?`Removed ${Math.round(time-duration)} more seconds. ${await diagnoseCuts(env,id,version,normalized)}${elsewhere?' The verified ad was outside the reported time.':''}`:null;
+        const reservation=await env.DB.prepare(`UPDATE episodes SET publication_seq=max(?,publication_seq+1,coalesce(ready_at,0)+1)
+          WHERE id=? RETURNING publication_seq`).bind(NOW(),id).first();
+        const publishedAt=reservation.publication_seq;
         const fixed=new FixedLengthStream(size),writer=fixed.writable.getWriter();
         const write=(async()=>{try{for(const range of ranges){const o=await env.AUDIO.get(meta.key,{range});const reader=o.body.getReader();try{for(;;){const {done,value}=await reader.read();if(done)break;await writer.write(value);}}finally{reader.releaseLock();}}await writer.close();}catch(e){await writer.abort(e);throw e;}})();
-        const publishedAt=Math.max(NOW(),Number((await env.DB.prepare('SELECT ready_at FROM episodes WHERE id=?').bind(id).first())?.ready_at||0)+1);
         await Promise.all([env.AUDIO.put(`clean/${id}/${publishedAt}.mp3`,fixed.readable,{httpMetadata:{contentType:'audio/mpeg'}}),write]);
-        await env.AUDIO.put(`clean/${id}/${publishedAt}.audit.json`,JSON.stringify({version:AUDIT_VERSION,
-          episode_id:id,workflow_id:event.instanceId||null,source_bytes:meta.size,source_duration:time,
-          transcript,cuts:normalized,transcription_gaps:{checked:gaps.length,recovered_segments:recoveredSegments},boundary_refinement:{refined_segments:boundaries.refined_segments,boundary_repairs:boundaries.boundary_repairs||0,coverage:boundaries.coverage},coverage:{passes:coverage.passes,converged:coverage.converged,unreviewed}}),{httpMetadata:{contentType:'application/json'}});
-        await env.DB.prepare("UPDATE episodes SET status='ready',progress=100,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=? WHERE id=?").bind(duration,size,JSON.stringify(normalized),publishedAt,reviewNotice,id).run();
+        await env.AUDIO.put(`clean/${id}/${publishedAt}.audit.json`,JSON.stringify({...audit,...(report?{diagnosis:detail}:{})}),{httpMetadata:{contentType:'application/json'}});
+        if(report){
+          const history=[...JSON.parse(ep.cuts_json),...normalized.map(c=>({...c,input_version:version}))];
+          // D1 commits the enclosure switch and the report outcome together. Replaying a completed step is harmless.
+          await env.DB.batch([
+            env.DB.prepare(`UPDATE episodes SET cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=NULL
+              WHERE id=? AND status='ready' AND coalesce(ready_at,0)=? AND created_at>?
+              AND EXISTS(SELECT 1 FROM subscriptions WHERE podcast_id=episodes.podcast_id)
+              AND EXISTS(SELECT 1 FROM missed_ad_reports WHERE episode_id=? AND version=? AND attempt=? AND status IN ('queued','running'))`)
+              .bind(duration,size,JSON.stringify(history),publishedAt,id,version,NOW()-RETENTION,id,version,attempt),
+            env.DB.prepare(`UPDATE missed_ad_reports SET status='fixed',detail=?,result_version=? WHERE episode_id=? AND version=? AND attempt=?
+              AND status IN ('queued','running') AND EXISTS(SELECT 1 FROM episodes WHERE id=? AND ready_at=?)`)
+              .bind(detail,publishedAt,id,version,attempt,id,publishedAt)
+          ]);
+          await finishReport(env,id,version,attempt,'closed','The reported version is no longer current or subscribed.');
+        }else await env.DB.prepare("UPDATE episodes SET status='ready',progress=100,cleaned_duration=?,audio_bytes=?,cuts_json=?,ready_at=?,error=? WHERE id=?").bind(duration,size,JSON.stringify(normalized),publishedAt,reviewNotice,id).run();
       });
       // Keep the exact publisher download under the existing seven-day source
       // lifecycle so subsequent model audits reuse this audio and its transcript.
-      await step.do('cleanup',STEP,async()=>{const list=await env.AUDIO.list({prefix:`work/${id}/`,limit:1000});if(list.objects.length)await env.AUDIO.delete(list.objects.map(o=>o.key));});
+      await step.do('cleanup',STEP,async()=>{const list=await env.AUDIO.list({prefix:workPrefix,limit:1000});if(list.objects.length)await env.AUDIO.delete(list.objects.map(o=>o.key));});
       return {episode_id:id,ads:normalized.length,removed_seconds:Math.round(removed),candidates,kept_by_review:keptByReview,unreviewed,audit_version:AUDIT_VERSION,audit_passes:coverage.passes};
     }catch(error){
       await step.do('record-failure',async()=>{
-        if(preserveReady)await env.DB.prepare("UPDATE episodes SET progress=100,error=? WHERE id=? AND status='ready'").bind('Audio refresh failed; the previous version is still available. '+String(error.message||'').slice(0,250),id).run();
+        if(report)await retryReport(env,id,version,attempt,error);
+        else if(preserveReady)await env.DB.prepare("UPDATE episodes SET progress=100,error=? WHERE id=? AND status='ready'").bind('Audio refresh failed; the previous version is still available. '+String(error.message||'').slice(0,250),id).run();
         else await env.DB.prepare("UPDATE episodes SET status='failed',error=? WHERE id=? AND status!='ready'").bind(String(error.message||'Processing failed').slice(0,400),id).run();
       });
       throw error;

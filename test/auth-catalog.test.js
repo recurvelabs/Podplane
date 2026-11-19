@@ -12,7 +12,7 @@ const {default:staging}=await import('../processor/staging.js');
 const {internal,tick,episodeIsUnlimited,reserveProcessingBudget}=await import('../processor/index.js');
 const origin='https://podplane-staging.challoner.dev',now=()=>Math.floor(Date.now()/1000),sha=s=>createHash('sha256').update(s).digest();
 function setup(){
-  const db=new DatabaseSync(':memory:');db.exec(fs.readFileSync(new URL('../processor/schema.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/002-auth-catalog.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/003-email-codes.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/004-chart-catalog.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/005-account-unlimited.sql',import.meta.url),'utf8'));
+  const db=new DatabaseSync(':memory:');db.exec(fs.readFileSync(new URL('../processor/schema.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/002-auth-catalog.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/003-email-codes.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/004-chart-catalog.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/005-account-unlimited.sql',import.meta.url),'utf8'));db.exec(fs.readFileSync(new URL('../processor/migrations/006-missed-ads.sql',import.meta.url),'utf8'));
   function prepare(sql,values=[]){return {bind(...v){return prepare(sql,v);},async first(){return db.prepare(sql).get(...values)||null;},async all(){return {results:db.prepare(sql).all(...values)};},async run(){const r=db.prepare(sql).run(...values);return {meta:{changes:Number(r.changes)}};}};}
   const env={PUBLIC_ORIGIN:origin,INTERNAL_SECRET:'internal-test',FEED_SECRET:'feed-test',EMAIL_FROM:'signin@notify.podplane-staging.challoner.dev',EMAIL:{messages:[],async send(message){this.messages.push(message);return {messageId:'test-message'};}},DB:{prepare,async batch(s){return Promise.all(s.map(x=>x.run()));}},PROCESS:{async create(){throw Error('Cached selection must not start processing');}}};
   const id=crypto.randomUUID(),session=randomBytes(32).toString('base64url');db.prepare('INSERT INTO accounts(id,subject,email,created_at) VALUES(?,?,?,?)').run(id,'email:alice@example.com','alice@example.com',now());db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(sha(session).toString('hex'),id,now(),now()+3600,'email');return {db,env,id,session};
@@ -197,4 +197,35 @@ test('an existing session and account page reflect an unlimited upgrade immediat
   assert.equal((await currentUser(req('/app',{cookie}),env)).unlimited,1);
   const me=await staging.fetch(req('/api/auth/me',{cookie}),env);assert.equal((await me.json()).user.plan,'unlimited');
   const page=await (await staging.fetch(req('/settings',{cookie}),env)).text();assert.ok(page.includes('Unlimited · No show or daily processing allowance limits.'));db.close();
+});
+
+test('missed-ad reports require the subscribed account, current published audio and same origin, and cron coalesces submissions',async()=>{
+  const {db,env,id,session}=setup(),cookie='__Host-podplane='+session;
+  const show='c'.repeat(32),episode='d'.repeat(40),path='/api/episodes/'+episode+'/missed-ad';
+  const submit=(body,overrides={})=>staging.fetch(req(path,{method:'POST',cookie,body,...overrides}),env);
+  db.prepare('INSERT INTO podcasts(id,feed_url,title,last_sync) VALUES(?,?,?,?)').run(show,'https://podcast.example/feed','Show',now());
+  db.prepare("INSERT INTO episodes(id,podcast_id,guid,title,source_url,published_at,created_at,status,ready_at,cleaned_duration) VALUES(?,?,?,?,?,?,?,'ready',10,100)")
+    .run(episode,show,'test','Episode','https://podcast.example/audio',now(),now());
+  const jobs=[],audioKey='clean/'+episode+'/10.mp3';
+  env.AUDIO={async head(key){return key===audioKey?{etag:'fixture-etag',size:200}:null;}};
+  env.PROCESS={async createBatch(items){jobs.push(...items);}};
+  assert.equal((await submit({version:10},{cookie:undefined})).status,401);
+  assert.equal((await submit({version:10},{headers:{Origin:'https://other.example'}})).status,403);
+  assert.equal((await submit({version:10})).status,404);
+  db.prepare('INSERT INTO subscriptions VALUES(?,?,?)').run(id,show,now());
+  assert.equal((await submit({version:9})).status,409);
+  assert.equal((await submit({version:10,position_seconds:150})).status,400);
+  assert.equal((await submit({version:10})).status,202);
+  const repeat=await submit({version:10,position_seconds:7});
+  assert.equal((await repeat.json()).episodes[0].report_status,'queued');
+  assert.equal(jobs.length,0);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM missed_ad_reports').get().n,1);
+  assert.equal(db.prepare('SELECT position_seconds FROM missed_ad_reports').get().position_seconds,7);
+  await Promise.all([tick(env),tick(env)]);
+  assert.equal(jobs.length,1);assert.deepEqual(jobs[0].params,{episode_id:episode,report_version:10,report_attempt:1});
+  assert.equal(db.prepare('SELECT status FROM missed_ad_reports').get().status,'running');
+  db.prepare('DELETE FROM subscriptions WHERE account_id=?').run(id);
+  await tick(env);
+  assert.equal(db.prepare('SELECT status FROM missed_ad_reports').get().status,'closed');
+  db.close();
 });

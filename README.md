@@ -31,6 +31,14 @@ Unlimited access is a stored account entitlement (`accounts.unlimited=1`) grante
 
 Use **Remove from feed** beside a show in **My podcasts**, or on its card in the shared catalog. Confirm the named show to remove its subscription and episodes from your Podplane feeds. Your combined feed link stays the same; your podcast app picks up the change when it refreshes. Downloads already stored in the player remain under the player’s control. You can add the show again, reusing available cached episodes. Removal affects only your account.
 
+## Reporting a missed ad
+
+Open a ready episode in **My podcasts** and choose **Report a missed ad**. You can enter the playback time from your podcast player. Reports for the same published version share one investigation. The existing 30-minute job dispatches reviews, and the episode shows the outcome.
+
+A review transcribes the published MP3 the listener heard, checks the whole episode and takes a closer look around a supplied time. Verified ads go through the same independent review and editorial boundary checks as new episodes. A successful repair updates the shared enclosure and compares the ad wording with the earlier audit. Refresh the feed and download the episode again to replace a local copy.
+
+Inconclusive reviews preserve the existing audio. A listener can add a playback time to an inconclusive report initially filed without one. The job retries processing failures once. Operators can inspect the status, diagnostic detail, last failure, input version and result version in `missed_ad_reports`. The private repair audit records the transcript, reviewed cuts and the playback timeline used for the investigation.
+
 ## Audio pipeline
 
 Combined RSS feeds prefix episode titles with a short show name, such as `Daily: ...`, `JRE: ...` or `PSA: ...`. Per-show feeds retain the publisher's episode titles. Feed URLs, episode GUIDs and audio enclosures stay the same.
